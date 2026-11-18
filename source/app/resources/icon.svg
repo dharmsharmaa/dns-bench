@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="dnsb-title">
+  <title id="dnsb-title">DNS Bench</title>
+  <desc>Dark navy squircle app icon with three ascending benchmark bars and a cyan accent dot.</desc>
+
+  <defs>
+    <!-- 824-unit superellipse (exponent 3.7, ~22% corner radius) on a 1024 canvas -->
+    <path id="dnsb-squircle" d="M924 512C924 568.77 922.58 641.45 919.7 682.31C916.83 723.17 912.54 735.54 906.74 757.13C900.94 778.73 893.74 795.78 884.88 811.86C876.03 827.94 865.79 841.45 853.62 853.62C841.45 865.79 827.94 876.03 811.86 884.88C795.78 893.74 778.73 900.94 757.13 906.74C735.54 912.54 723.17 916.83 682.31 919.7C641.45 922.58 568.77 924 512 924C455.23 924 382.55 922.58 341.69 919.7C300.83 916.83 288.46 912.54 266.87 906.74C245.27 900.94 228.22 893.74 212.14 884.88C196.06 876.03 182.55 865.79 170.38 853.62C158.21 841.45 147.97 827.94 139.12 811.86C130.26 795.78 123.06 778.73 117.26 757.13C111.46 735.54 107.17 723.17 104.3 682.31C101.42 641.45 100 568.77 100 512C100 455.23 101.42 382.55 104.3 341.69C107.17 300.83 111.46 288.46 117.26 266.87C123.06 245.27 130.26 228.22 139.12 212.14C147.97 196.06 158.21 182.55 170.38 170.38C182.55 158.21 196.06 147.97 212.14 139.12C228.22 130.26 245.27 123.06 266.87 117.26C288.46 111.46 300.83 107.17 341.69 104.3C382.55 101.42 455.23 100 512 100C568.77 100 641.45 101.42 682.31 104.3C723.17 107.17 735.54 111.46 757.13 117.26C778.73 123.06 795.78 130.26 811.86 139.12C827.94 147.97 841.45 158.21 853.62 170.38C865.79 182.55 876.03 196.06 884.88 212.14C893.74 228.22 900.94 245.27 906.74 266.87C912.54 288.46 916.83 300.83 919.7 341.69C922.58 382.55 924 455.23 924 512Z"/>
+    <clipPath id="dnsb-clip"><use href="#dnsb-squircle"/></clipPath>
+
+    <linearGradient id="dnsb-body" x1="440" y1="100" x2="600" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1533"/>
+      <stop offset=".5" stop-color="#1f2059"/>
+      <stop offset="1" stop-color="#33308f"/>
+    </linearGradient>
+
+    <radialGradient id="dnsb-spec" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(512 280) scale(410 272)">
+      <stop stop-color="#ffffff" stop-opacity=".115"/>
+      <stop offset=".42" stop-color="#ffffff" stop-opacity=".055"/>
+      <stop offset=".75" stop-color="#ffffff" stop-opacity=".015"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="dnsb-sheen" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(512 146) scale(330 52)">
+      <stop stop-color="#ffffff" stop-opacity=".105"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="dnsb-inner" x1="512" y1="700" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#050a18" stop-opacity="0"/>
+      <stop offset="1" stop-color="#050a18" stop-opacity=".3"/>
+    </linearGradient>
+
+    <linearGradient id="dnsb-rim" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f2f7ff" stop-opacity=".85"/>
+      <stop offset=".45" stop-color="#dce8ff" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#dce8ff" stop-opacity=".07"/>
+    </linearGradient>
+
+    <linearGradient id="dnsb-bar" x1="512" y1="274" x2="512" y2="706" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dce6fe"/>
+    </linearGradient>
+
+    <linearGradient id="dnsb-dot" x1="660" y1="158" x2="660" y2="222" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6bdeff"/>
+      <stop offset="1" stop-color="#1f94ff"/>
+    </linearGradient>
+
+    <filter id="dnsb-shadow" x="40" y="60" width="944" height="964" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#05080f" flood-opacity=".42"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#dnsb-shadow)">
+    <g clip-path="url(#dnsb-clip)">
+      <use href="#dnsb-squircle" fill="url(#dnsb-body)"/>
+      <ellipse cx="512" cy="300" rx="430" ry="300" fill="url(#dnsb-spec)"/>
+      <ellipse cx="512" cy="146" rx="330" ry="52" fill="url(#dnsb-sheen)"/>
+      <rect x="100" y="700" width="824" height="224" fill="url(#dnsb-inner)"/>
+      <use href="#dnsb-squircle" fill="none" stroke="url(#dnsb-rim)" stroke-width="5"/>
+    </g>
+  </g>
+
+  <!-- benchmark bars: 104 x (180 / 306 / 432), baseline 706, 44pt gaps -->
+  <g fill="url(#dnsb-bar)">
+    <rect x="312" y="526" width="104" height="180" rx="52"/>
+    <rect x="460" y="400" width="104" height="306" rx="52"/>
+    <rect x="608" y="274" width="104" height="432" rx="52"/>
+  </g>
+
+  <circle cx="660" cy="190" r="32" fill="url(#dnsb-dot)"/>
+</svg>

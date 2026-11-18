@@ -1,0 +1,17 @@
+{
+  "name": "dns-bench-mac",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DNS Bench for macOS — benchmark, inspect and switch DNS resolvers",
+  "author": "Dharm Sharma (https://dharmsharma.com)",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.3.3"
+  }
+}
