@@ -104,8 +104,8 @@ Commands
   install [--system]  copy this script into your PATH as `dns-bench`
   uninstall         remove the command and the schedule
   cron WHEN|off     schedule auto runs. WHEN = hourly | 6h | daily | weekly |
-                    "m h dom mon dow" (Linux). add --at HH:MM for daily/weekly,
-                    --profile best|adblock (default best)
+                    2d (every N days, 1-30) | "m h dom mon dow" (Linux).
+                    add --at HH:MM for daily/weekly/Nd, --profile best|adblock
   update [--check]  pull the latest version of this script from GitHub
   version, help
 
@@ -1540,13 +1540,14 @@ cron_expr() {   # cron_expr WHEN AT -> 5-field expression
     6h)     print "7 */6 * * *" ;;
     daily)  print "$mm $hh * * *" ;;
     weekly) print "$mm $hh * * 0" ;;
+    <1-30>d) print "$mm $hh */${when%d} * *" ;;
     *)      if [[ "$when" == *\ *\ *\ *\ * ]]; then print -r -- "$when"; else return 1; fi ;;
   esac
 }
 
 cmd_cron() {
   local when=$1 prof=${o_prof[-1]:-best} at=${o_at[-1]:-04:00} inst expr
-  [[ -n "$when" ]] || die "usage: dns-bench cron hourly|6h|daily|weekly|off   (or a 5-field cron expression)"
+  [[ -n "$when" ]] || die "usage: dns-bench cron hourly|6h|daily|weekly|2d|off   (or a 5-field cron expression)"
   [[ "$prof" == (best|adblock) ]] || die "--profile must be best or adblock"
   [[ "$at" =~ '^[0-9]{1,2}:[0-9]{2}$' ]] || die "--at must be HH:MM"
   if [[ "$when" == off ]]; then cron_remove; return; fi
@@ -1567,7 +1568,8 @@ cmd_cron() {
       6h)     sched="<key>StartInterval</key><integer>21600</integer>" ;;
       daily)  sched="<key>StartCalendarInterval</key><dict><key>Hour</key><integer>$((10#${at%%:*}))</integer><key>Minute</key><integer>$((10#${at##*:}))</integer></dict>" ;;
       weekly) sched="<key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>$((10#${at%%:*}))</integer><key>Minute</key><integer>$((10#${at##*:}))</integer></dict>" ;;
-      *) die "on macOS use hourly, 6h, daily or weekly" ;;
+      <1-30>d) sched="<key>StartInterval</key><integer>$(( ${when%d} * 86400 ))</integer>" ;;
+      *) die "on macOS use hourly, 6h, daily, weekly or Nd (e.g. 2d)" ;;
     esac
     cat > "$TMP/com.dns-bench.auto.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1600,7 +1602,8 @@ EOF
       6h)     cal="*-*-* 00/6:07:00" ;;
       daily)  cal="*-*-* $at:00" ;;
       weekly) cal="Sun *-*-* $at:00" ;;
-      *) die "no cron found; with the systemd fallback use hourly, 6h, daily or weekly" ;;
+      <1-30>d) cal="*-*-1/${when%d} $at:00" ;;
+      *) die "no cron found; with the systemd fallback use hourly, 6h, daily, weekly or Nd" ;;
     esac
     printf '[Unit]\nDescription=dns-bench auto\n\n[Service]\nType=oneshot\nExecStart=%s\nStandardOutput=append:/var/log/dns-bench.log\nStandardError=append:/var/log/dns-bench.log\n' "$line" | run_root tee /etc/systemd/system/dns-bench.service >/dev/null
     printf '[Unit]\nDescription=dns-bench schedule\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' "$cal" | run_root tee /etc/systemd/system/dns-bench.timer >/dev/null
