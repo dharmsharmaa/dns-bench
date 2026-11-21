@@ -18,3 +18,5 @@ source/app/resources/trayTemplate.png
 source/app/resources/trayTemplate@2x.png
 source/results/
 source/history.json
+
+temp/
