@@ -1,15 +1,30 @@
-#!/bin/zsh
-# dns-bench 3.3: DNS benchmark, network diagnostics, domain troubleshooting. macOS + Linux.
+#!/bin/sh
+# dns-bench: DNS benchmark, network diagnostics, domain troubleshooting. macOS + Linux.
 # Author: Dharm Sharma (https://dharmsharma.com)
 # License: MIT (see LICENSE)
 # Run `dns-bench help` for commands.
+#
+# The shebang is /bin/sh on purpose. The body below is zsh, but naming zsh in
+# the shebang makes the kernel fail with a bare "cannot execute: required file
+# not found" on any machine without zsh, which is the opposite of helpful. sh
+# always exists, so the bootstrap runs, explains the problem, and only then
+# execs zsh.
 
 # --- POSIX sh bootstrap ----------------------------------------------------
 # Lets `sh dns-bench.zsh` and `bash dns-bench.zsh` work, and offers to install
 # zsh when it is missing. This block must stay POSIX-clean: zsh-only syntax
 # starts after the `exec` below.
 if [ -z "${ZSH_VERSION:-}" ]; then
-  if ! command -v zsh >/dev/null 2>&1; then
+  # zsh may be installed but off PATH (cron, minimal containers, sudo -i).
+  ZSH_BIN=''
+  if command -v zsh >/dev/null 2>&1; then
+    ZSH_BIN=$(command -v zsh)
+  else
+    for z in /usr/bin/zsh /usr/local/bin/zsh /bin/zsh /opt/homebrew/bin/zsh /snap/bin/zsh; do
+      if [ -x "$z" ]; then ZSH_BIN=$z; break; fi
+    done
+  fi
+  if [ -z "$ZSH_BIN" ]; then
     printf 'dns-bench needs zsh, which is not installed.\n' >&2
     if command -v brew >/dev/null 2>&1; then
       ZSH_INSTALL='brew install zsh'
@@ -52,13 +67,20 @@ if [ -z "${ZSH_VERSION:-}" ]; then
       exit 1
     fi
     hash -r 2>/dev/null || true
-    if ! command -v zsh >/dev/null 2>&1; then
+    printf 'zsh installed.\n' >&2
+    ZSH_BIN=''
+    if command -v zsh >/dev/null 2>&1; then ZSH_BIN=$(command -v zsh); fi
+    if [ -z "$ZSH_BIN" ]; then
+      for z in /usr/bin/zsh /usr/local/bin/zsh /bin/zsh /opt/homebrew/bin/zsh /snap/bin/zsh; do
+        if [ -x "$z" ]; then ZSH_BIN=$z; break; fi
+      done
+    fi
+    if [ -z "$ZSH_BIN" ]; then
       printf 'zsh is still not on PATH. Open a new shell and run dns-bench again.\n' >&2
       exit 1
     fi
-    printf 'zsh installed.\n' >&2
   fi
-  exec zsh "$0" "$@"
+  exec "$ZSH_BIN" "$0" "$@"
 fi
 # --- end bootstrap ---------------------------------------------------------
 

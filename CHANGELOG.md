@@ -40,6 +40,17 @@ One number for the whole connection, and a trophy when it is a good one.
   `dns-bench run`) and the egress host, which reuses the helper the file already had.
 - Six README feature rows (81-86) and a `### score` section in the command reference.
 
+### Fixed
+
+- **`./dns-bench.zsh` failed on a machine without zsh**, with only
+  `bash: ./dns-bench.zsh: cannot execute: required file not found`. The shebang named `/bin/zsh`, so
+  the kernel refused to exec the file and the zsh-install bootstrap never ran — it was only reachable
+  via `sh dns-bench.zsh` or `bash dns-bench.zsh`. The shebang is now `/bin/sh`, which always exists,
+  so the bootstrap runs and either finds zsh or offers to install it. The interpreter lookup also
+  checks `/usr/bin/zsh`, `/usr/local/bin/zsh`, `/bin/zsh`, `/opt/homebrew/bin/zsh` and `/snap/bin/zsh`
+  before concluding zsh is missing, because `cron`, `sudo -i` and minimal containers routinely have it
+  installed but off `PATH`.
+
 ### Changed
 
 - Command count 33 to 34. `score` sits in the `diagnose` help group.

@@ -40,9 +40,14 @@ Unblock-File .\dns-bench.ps1
 Benchmarking runs as a normal user; changing DNS needs an **elevated** PowerShell. Windows
 PowerShell 5.1 and PowerShell 7+ both work.
 
-No zsh? The script bootstraps itself. `sh dns-bench.zsh` or `bash dns-bench.zsh` re-execs under zsh.
-If zsh is missing it detects `brew`, `apt`, `dnf`, `yum`, `pacman`, `zypper` or `apk`, shows the
-command it would run, and asks first. Unattended: `DNSBENCH_ASSUME_YES=1 sh dns-bench.zsh`.
+No zsh? Run it anyway. The shebang is `/bin/sh`, not `/bin/zsh`, so `./dns-bench.zsh` always starts:
+the bootstrap re-execs under zsh, and if zsh is missing it detects `brew`, `apt`, `dnf`, `yum`,
+`pacman`, `zypper` or `apk`, shows the command it would run, and asks first. Unattended:
+`DNSBENCH_ASSUME_YES=1 ./dns-bench.zsh`.
+
+That shebang detail matters more than it looks. With `#!/bin/zsh` and no zsh installed, the kernel
+fails before a single line runs and bash reports only `cannot execute: required file not found`, which
+tells you nothing about the actual problem. Naming `sh` means the install prompt is reachable.
 
 Required tools: `dig`, `curl`, `perl`, `awk`, `ping` — all present on macOS. On Linux install
 `dnsutils` (Debian/Ubuntu) or `bind-utils` (Fedora/RHEL), plus `iproute2`. `openssl`, `traceroute`,
