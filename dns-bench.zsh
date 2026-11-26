@@ -64,7 +64,7 @@ fi
 
 emulate -L zsh
 
-VERSION=3.3.0
+VERSION=3.4.0
 SELF=${0:A}
 SELF_DIR=${SELF:h}
 
@@ -114,7 +114,7 @@ usage() {
   print "${C_W}Commands${C_0}"
   help_group "benchmark"   "$(hl_names run best auto)"
   help_group "dns control" "$(hl_names set reset adblock status list flush)"
-  help_group "diagnose"    "$(hl_names info test)"
+  help_group "diagnose"    "$(hl_names info test score)"
   help_group "network"     "$(hl_names speed ports http tls trace asn ptr mtu leak propagation ecs ifaces listen wifi)"
   help_group "maintenance" "$(hl_names install uninstall cron update demo doctor)"
   print ""
@@ -231,6 +231,9 @@ cmd_help_detail() {
     wifi) help_item "dns-bench wifi" \
       "SSID, BSSID, channel, band, signal, noise, tx rate and security." \
       "dns-bench wifi" "dns-bench wifi -q" ;;
+    score) help_item "dns-bench score [--no-upload] [-q]" \
+      "One graded score for this connection: DNS, latency, throughput, privacy, stability." \
+      "dns-bench score" "dns-bench score -q --no-upload" ;;
     doctor) help_item "dns-bench doctor" \
       "Dependency, privilege, install, schedule, log and version checklist. Exits 1 if a required tool is missing." \
       "dns-bench doctor" "dns-bench doctor -q" ;;
@@ -274,7 +277,7 @@ zparseopts -D -E -- d:=o_d n:=o_n t:=o_t x:=o_x o:=o_o r:=o_r T:=o_T N=o_N P=o_P
 (( $#o_ver )) && { print "dns-bench $VERSION"; exit 0 }
 
 KNOWN_CMDS=(run info test best adblock set reset flush status list speed demo auto install uninstall cron update version help
-  ports http tls trace asn ptr leak propagation mtu ecs ifaces listen wifi doctor)
+  ports http tls trace asn ptr leak propagation mtu ecs ifaces listen wifi doctor score)
 CMD=run
 DOMAIN_ARG=
 if [[ -n "$1" ]]; then
@@ -2290,6 +2293,18 @@ cmd_demo() {
   kv "Your current DNS" "Current system DNS: cached 14 ms, cold 36 ms, score 23.0"
   kv "" "${C_G}already near the top${C_0}"
 
+  section "Connection score"
+  SCORE_V=(dns 84 latency 91 speed 71 privacy 64 stability 88 total 80)
+  SCORE_D=(
+    dns       "cached 14 ms, cold 36 ms, 1% loss"
+    latency   "14.2 ms, jitter 1.1 ms"
+    speed     "down 482 Mbps, up 211 Mbps"
+    privacy   "NXDOMAIN ok, DNSSEC yes, DoT yes"
+    stability "1% DNS loss, 0% ICMP loss"
+  )
+  score_render
+  note "Bands are this tool's rubric for a healthy connection, not a survey of the internet."
+
   print
   note "Demo data. Nothing was probed and no DNS settings were read."
   return 0
@@ -2965,6 +2980,305 @@ cmd_doctor() {
 }
 
 # =====================================================================
+# connection score
+# =====================================================================
+# The bands below are this tool's own rubric, written from what a healthy
+# cable or fibre connection does. They are NOT a percentile against a survey
+# of the internet, because no such dataset for *your* machine exists and
+# inventing one would be the same class of error as the cold-cache bug.
+typeset -A SCORE_V SCORE_D
+typeset -A SCORE_FIX
+SCORE_FIX=(
+  dns       "try another resolver: dns-bench run"
+  latency   "inspect the path: dns-bench trace 1.1.1.1"
+  speed     "measure the link on its own: dns-bench speed"
+  privacy   "find the weak link: dns-bench leak && dns-bench test example.com"
+  stability "chase the loss: dns-bench wifi / dns-bench ports 1.1.1.1"
+)
+
+SCORE_ART=(
+  '     ___________     '
+  '     |         |     '
+  '     |    @    |     '
+  '     |         |     '
+  '      \       /      '
+  '       \_____/       '
+  '         | |         '
+  '         | |         '
+  '      ___| |___      '
+  '     |         |     '
+  '     |_________|     '
+)
+
+bar() {   # bar PCT WIDTH -> ASCII bar, no newline
+  local pct=${1%.*} w=${2:-20} i out=
+  (( pct < 0 )) && pct=0
+  (( pct > 100 )) && pct=100
+  local fill=$(( pct * w / 100 ))
+  for (( i = 1; i <= w; i++ )); do
+    if (( i <= fill )); then out+="#"; else out+="."; fi
+  done
+  print -n -- "$out"
+}
+
+score_colour() {   # score_colour PCT -> colour escape for that level
+  local p=${1%.*}
+  if   (( p >= 85 )); then print -n -- "$C_OK"
+  elif (( p >= 70 )); then print -n -- "$C_C"
+  elif (( p >= 55 )); then print -n -- "$C_WARN"
+  else print -n -- "$C_ERR"; fi
+}
+
+score_band_name() {   # score_band_name TOTAL
+  local t=${1%.*}
+  if   (( t >= 93 )); then print "top tier"
+  elif (( t >= 85 )); then print "strong"
+  elif (( t >= 72 )); then print "above typical"
+  elif (( t >= 58 )); then print "typical"
+  elif (( t >= 42 )); then print "below typical"
+  else print "weak"; fi
+}
+
+score_grade() {   # score_grade TOTAL -> single letter
+  local t=${1%.*}
+  if   (( t >= 93 )); then print S
+  elif (( t >= 85 )); then print A
+  elif (( t >= 72 )); then print B
+  elif (( t >= 58 )); then print C
+  elif (( t >= 42 )); then print D
+  else print E; fi
+}
+
+# score_compute KEY=VAL ... -> "dns=NN.N" lines; -1 means "not measurable"
+score_compute() {
+  printf '%s\n' "$@" | awk -F= '
+    function band(x, list,   n, p, i, kv, px, ps, cx, cs) {
+      if (x < 0) return -1
+      n = split(list, p, ",")
+      split(p[1], kv, ":"); px = kv[1] + 0; ps = kv[2] + 0
+      if (x <= px) return ps
+      for (i = 2; i <= n; i++) {
+        split(p[i], kv, ":"); cx = kv[1] + 0; cs = kv[2] + 0
+        if (x <= cx) return ps + (cs - ps) * (x - px) / (cx - px)
+        px = cx; ps = cs
+      }
+      return ps
+    }
+    function mix(s1, w1, s2, w2, s3, w3, s4, w4,   sum, w) {
+      sum = 0; w = 0
+      if (s1 >= 0) { sum += s1 * w1; w += w1 }
+      if (s2 >= 0) { sum += s2 * w2; w += w2 }
+      if (s3 >= 0) { sum += s3 * w3; w += w3 }
+      if (s4 >= 0) { sum += s4 * w4; w += w4 }
+      return (w > 0) ? sum / w : -1
+    }
+    { v[$1] = $2 + 0 }
+    END {
+      cached_s = band(v["cached"], "5:100,10:92,20:82,40:66,80:46,150:26,300:8")
+      cold_s   = band(v["cold"],   "20:100,50:86,100:66,200:42,400:20,800:6")
+      djit_s   = band(v["djit"],   "1:100,5:86,15:62,30:38,60:16")
+      dloss_s  = band(v["dloss"],  "0:100,1:88,3:62,6:38,12:14,25:0")
+      icmp_s   = band(v["icmp"],   "5:100,15:94,30:84,60:66,120:42,250:18")
+      ijit_s   = band(v["ijit"],   "2:100,8:84,20:60,40:34")
+      iloss_s  = band(v["iloss"],  "0:100,2:66,5:34,10:10")
+      down_s   = band(v["down"],   "2:6,5:16,10:30,25:52,50:68,100:80,250:92,500:100")
+      up_s     = band(v["up"],     "1:6,5:30,10:50,25:70,50:86,100:100")
+
+      nx_s     = (v["nx"]     < 0) ? 50 : v["nx"]
+      dnssec_s = (v["dnssec"] < 0) ? 50 : v["dnssec"]
+      egress_s = (v["egress"] < 0) ? 50 : v["egress"]
+      dot_s    = (v["dot"]    < 0) ? 50 : v["dot"]
+
+      dns  = mix(cached_s, 0.50, cold_s, 0.30, djit_s, 0.10, dloss_s, 0.10)
+      net  = mix(icmp_s,   0.70, ijit_s, 0.20, iloss_s, 0.10, -1, 0)
+      spd  = mix(down_s,   0.65, up_s,   0.35, -1, 0, -1, 0)
+      priv = mix(nx_s,     0.30, dnssec_s, 0.25, egress_s, 0.25, dot_s, 0.20)
+      stab = mix(dloss_s,  0.50, iloss_s, 0.50, -1, 0, -1, 0)
+
+      w = 0; t = 0
+      if (dns  >= 0) { t += dns  * 0.35; w += 0.35 }
+      if (net  >= 0) { t += net  * 0.20; w += 0.20 }
+      if (spd  >= 0) { t += spd  * 0.20; w += 0.20 }
+      if (priv >= 0) { t += priv * 0.15; w += 0.15 }
+      if (stab >= 0) { t += stab * 0.10; w += 0.10 }
+      total = (w > 0) ? t / w : 0
+
+      printf "dns=%.1f\n",       dns
+      printf "latency=%.1f\n",   net
+      printf "speed=%.1f\n",     spd
+      printf "privacy=%.1f\n",   priv
+      printf "stability=%.1f\n", stab
+      printf "total=%.1f\n",     total
+    }
+  '
+}
+
+score_render() {   # score_render [--animate]   (reads SCORE_V and SCORE_D)
+  local anim=${1:-} m pct col b total grade band pos
+  local -a metrics=(dns latency speed privacy stability)
+  total=${SCORE_V[total]:-0}
+  grade=$(score_grade "$total")
+  band=$(score_band_name "$total")
+
+  print ""
+  for m in $metrics; do
+    [[ "${SCORE_V[$m]:--1}" == -* ]] && continue
+    pct=${SCORE_V[$m]%.*}
+    col=$(score_colour "$pct")
+    b=$(bar "$pct" 20)
+    printf "  %-10s %s%s%s  ${C_B}%3d${C_0}   %s\n" "$m" "$col" "$b" "$C_0" "$pct" "${C_D}${SCORE_D[$m]}${C_0}"
+    [[ "$anim" == --animate ]] && sleep 0.05
+  done
+
+  pct=${total%.*}
+  col=$(score_colour "$pct")
+  print ""
+  if [[ "$anim" == --animate ]]; then
+    local step
+    for (( step = 1; step <= 20; step++ )); do
+      printf "\r  %-10s %s%s%s  %3d  " "total" "$col" "$(bar $(( pct * step / 20 )) 20)" "$C_0" $(( pct * step / 20 ))
+      sleep 0.025
+    done
+  fi
+  local cr=
+  [[ "$anim" == --animate ]] && cr=$'\r'
+  printf "%s  %-10s %s%s%s  ${C_B}%3d${C_0}   %s\n" "$cr" "total" "$col" "$(bar "$pct" 20)" "$C_0" "$pct" "${C_W}${band}${C_0}"
+
+  if (( pct >= 72 )); then
+    print ""
+    [[ "$anim" == --animate ]] && sleep 0.12
+    local line art
+    for line in "${SCORE_ART[@]}"; do
+      art=${line//@/$grade}
+      print -r -- "  ${col}${art%% ##}${C_0}"
+      [[ "$anim" == --animate ]] && sleep 0.045
+    done
+  else
+    local -a pairs
+    local pm
+    for pm in $metrics; do
+      [[ "${SCORE_V[$pm]:--1}" == -* ]] && continue
+      pairs+=("${SCORE_V[$pm]%.*} $pm")
+    done
+    pairs=(${(on)pairs})
+    print ""
+    note "no trophy this run, but the weakest lines are specific:"
+    local rank=0
+    for pm in "${pairs[@]}"; do
+      (( ++rank > 2 )) && break
+      pm=${pm#* }
+      print "  ${C_WARN}-${C_0} $pm ${C_D}(${SCORE_V[$pm]%.*}%)${C_0}: ${SCORE_FIX[$pm]}"
+    done
+  fi
+
+  print ""
+  print "  ${C_B}${grade}${C_0}   ${total}/100   ${C_D}${band}${C_0}"
+  print ""
+  pos=$(( (pct * 51 + 50) / 100 ))
+  print "  ${C_D}0        20        40        60        80        100${C_0}"
+  print "  ${C_D}|--------|---------|---------|---------|---------|${C_0}"
+  printf "  %s%s^ %s %s\n" "$(printf '%*s' "$pos" '')" "$col" "$total" "$band"
+}
+
+cmd_score() {
+  local cur pub egress nx ds dot cstats kstats idx= lat jit loss dl ul dln upn
+  local -i anim=0
+  detect_net
+  [[ -n "$ACTIVE_DEV" ]] || die "no default route: you appear to be offline"
+  need dig || die "dig is required"
+  build_resolvers
+  cur=${SYS_DNS[1]:-$GATEWAY}
+  [[ -n "$cur" ]] || die "no resolver configured: nothing to score"
+  (( PROGRESS_TTY && ! TERSE )) && anim=1
+
+  idx=$(resolver_of_ip "$cur" 2>/dev/null)
+  print "${C_B}dns-bench $VERSION${C_0}  ${C_D}connection score${C_0}"
+  kv "Resolver" "$cur${idx:+ (#$idx)}"
+  kv "Target" "$DOMAIN, $SAMPLES samples"
+  local est=$(( SPEED_SECS + 10 ))
+  (( SPEED_UPLOAD )) && est=$(( SPEED_SECS * 2 + 10 ))
+  kv "Measured" "dns, latency, throughput, privacy (about ${est}s)"
+  if (( TUNNEL )); then
+    kv "VPN" "${C_C}tunnel $DEF_DEV${C_0}: DNS is scored through the tunnel, not around it"
+  else
+    kv "VPN" "none detected"
+  fi
+
+  cstats=$(dns_stats "$cur" cached "$SAMPLES")
+  [[ -n "$idx" ]] || idx=0
+  kstats=$(dns_stats "$cur" cold 3 "$idx")
+
+  read -r lat jit loss <<< "$(ping_detail 1.1.1.1)"
+  if [[ "$lat" == Timeout ]]; then read -r lat jit loss <<< "$(ping_detail 8.8.8.8)"; fi
+
+  dl=$(speed_download "$SPEED_SECS")
+  (( PROGRESS_TTY )) && print
+  if (( SPEED_UPLOAD )); then ul=$(speed_upload "$SPEED_SECS"); else ul=fail; fi
+
+  nx=$(t_nx "$cur" "$idx")
+  ds=$(t_dnssec "$cur")
+  dot=$(t_port "$cur" 853)
+  pub=; egress=
+  if (( ! NO_EXT )); then
+    pub=$(pub_ip)
+    egress=$(dig +short whoami.akamai.net +time=3 +tries=1 2>/dev/null | tail -1)
+  fi
+
+  local -a kvargs
+  local c_med d_jit d_loss k_med
+  c_med=${${=cstats}[1]}; d_jit=; d_loss=${${=cstats}[4]}
+  if is_num "${${=cstats}[2]}" && is_num "${${=cstats}[3]}"; then
+    d_jit=$(printf '%.1f' $(( ${${=cstats}[3]} - ${${=cstats}[2]} )))
+  fi
+  k_med=${${=kstats}[1]}
+  is_num "$c_med" || c_med=-1
+  is_num "$k_med" || k_med=-1
+  is_num "$d_jit" || d_jit=-1
+  is_num "$d_loss" || d_loss=-1
+
+  [[ "$lat" == Timeout ]] && lat=-1
+  is_num "$lat" || lat=-1
+  is_num "$jit" || jit=-1
+  is_num "$loss" || loss=-1
+
+  dln=${dl%% *}; upn=${ul%% *}
+  if [[ "$dl" == fail* ]] || ! is_num "$dln"; then dln=-1; fi
+  if [[ "$ul" == fail* ]] || ! is_num "$upn"; then upn=-1; fi
+
+  kvargs=("cached=$c_med" "cold=$k_med" "djit=$d_jit" "dloss=$d_loss"
+          "icmp=$lat" "ijit=$jit" "iloss=$loss" "down=$dln" "up=$upn")
+  case "$nx" in ok) kvargs+=("nx=100") ;; HIJACK) kvargs+=("nx=0") ;; *) kvargs+=("nx=-1") ;; esac
+  case "$ds" in yes) kvargs+=("dnssec=100") ;; no) kvargs+=("dnssec=25") ;; *) kvargs+=("dnssec=-1") ;; esac
+  case "$dot" in yes) kvargs+=("dot=100") ;; *) kvargs+=("dot=40") ;; esac
+  if (( NO_EXT )) || [[ -z "$pub" || -z "$egress" ]]; then kvargs+=("egress=-1")
+  elif [[ "$pub" == "$egress" ]]; then kvargs+=("egress=100")
+  else kvargs+=("egress=30"); fi
+
+  local k v
+  while IFS='=' read -r k v; do [[ -n "$k" ]] && SCORE_V[$k]=$v; done < <(score_compute "${kvargs[@]}")
+
+  SCORE_D[dns]="cached ${c_med/-1/?} ms, cold ${k_med/-1/?} ms, ${d_loss/-1/?}% loss"
+  SCORE_D[latency]="${lat/-1/?} ms, jitter ${jit/-1/?} ms"
+  if (( ! SPEED_UPLOAD )); then
+    SCORE_D[speed]="down ${dln/-1/?} Mbps, upload skipped"
+  else
+    SCORE_D[speed]="down ${dln/-1/?} Mbps, up ${upn/-1/?} Mbps"
+  fi
+  SCORE_D[privacy]="NXDOMAIN $nx, DNSSEC $ds, DoT $dot"
+  local l1=${d_loss/-1/?} l2=${loss/-1/?}
+  l1=${l1%.0}; l2=${l2%.0}
+  SCORE_D[stability]="${l1}% DNS loss, ${l2}% ICMP loss"
+
+  (( anim )) && score_render --animate || score_render
+
+  print ""
+  (( TUNNEL )) && note "VPN detected: the privacy line scores the resolver you reach through $DEF_DEV. A leak shows up as a mismatch, not as a lower score by itself."
+  (( NO_EXT )) && note "Privacy mode: external IP checks were skipped, so the egress item is neutral."
+  [[ "$dl" == fail* ]] && note "Throughput unavailable, so the speed line was left out of the total and the rest was reweighted."
+  note "Bands are this tool's rubric for a healthy connection, not a survey of the internet. Run twice before reading a 3-point difference."
+}
+
+# =====================================================================
 # dispatch
 # =====================================================================
 case "$CMD" in
@@ -2999,4 +3313,5 @@ case "$CMD" in
   listen)    cmd_listen ;;
   wifi)      cmd_wifi ;;
   doctor)    cmd_doctor ;;
+  score)     cmd_score ;;
 esac

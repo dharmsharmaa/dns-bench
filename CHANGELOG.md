@@ -12,6 +12,55 @@ behaviour changes, not commits — if you want the diff, read the diff.
 
 ---
 
+## 3.4.0 — 2026-11-26
+
+One number for the whole connection, and a trophy when it is a good one.
+
+### Added
+
+- **`score`.** Five lines measured and graded 0-100, then weighted into a single total: dns 35%
+  (cached 50%, cold 30%, jitter 10%, loss 10%), latency 20% (ICMP 70%, jitter 20%, loss 10%), speed
+  20% (download 65%, upload 35%), privacy 15% (NXDOMAIN honour 30%, DNSSEC 25%, egress match 25%,
+  DoT 20%) and stability 10% (DNS loss and ICMP loss, half each). S at 93, A at 85, B at 72, C at
+  58, D at 42, E below.
+- **A trophy, animated, only when it is earned and only on a terminal.** Grade B and above draws an
+  ASCII trophy line by line with the letter engraved and the total bar counting up to it. Grades C
+  and below get the two weakest lines and the command that investigates each one instead, because a
+  medal is not the useful part of a low score.
+- **Drop-and-reweight.** A line that cannot be measured (no upload, ICMP blocked, speed test refused)
+  is removed and the remaining weights renormalised. A closed port is not evidence of a bad
+  connection, and the previous behaviour of scoring it zero would have said it was.
+- **A VPN line rather than a VPN penalty.** A detected tunnel is named, and DNS is then measured
+  through it. The privacy score falls on a mismatch, such as queries leaving outside the tunnel, not
+  on the tunnel existing.
+- `score` in `demo` mode, so the report and the trophy can be screenshotted without a network.
+- **PowerShell parity.** `score` on Windows uses the same bands, weights, thresholds, layout, trophy
+  and notes, and produces byte-identical output to the zsh version for the same measurements. The
+  only differences are platform syntax in the advice text (`.\dns-bench.ps1 run` rather than
+  `dns-bench run`) and the egress host, which reuses the helper the file already had.
+- Six README feature rows (81-86) and a `### score` section in the command reference.
+
+### Changed
+
+- Command count 33 to 34. `score` sits in the `diagnose` help group.
+- Version 3.4.0 in both CLIs.
+
+### Not changed
+
+- The benchmark's own scoring formula `(cached + 2*cold) / 3 + 3*loss%`. `score` is a separate
+  rubric for the connection as a whole and does not feed the resolver ranking.
+- Resolver kinds, the CSV schema, and `run`'s output.
+- The Mac app, still frozen at 1.0.0.
+
+### Notably not done
+
+- **No percentile.** The obvious version of this feature tells you "you are in the top 12%". That
+  would require a survey of other people's connections, which this project does not have and cannot
+  honestly fake. The bands are a rubric drawn from what a healthy cable or fibre link does, and the
+  output says so on every run.
+
+---
+
 ## 3.3.0 — 2026-11-26
 
 The release where it stopped being only a DNS benchmark. Also the release where a reader found a

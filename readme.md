@@ -4,7 +4,7 @@
 then switch only if the numbers say so.
 
 One script: zsh on macOS and Linux, PowerShell on Windows. No daemon, no telemetry, no dependencies
-past the tools the OS already ships. MIT, v3.3.0. A Mac app exists too — [it is at the
+past the tools the OS already ships. MIT, v3.4.0. A Mac app exists too — [it is at the
 bottom](#the-mac-app).
 
 <img src="docs/screenshots/cli-benchmark.png" alt="dns-bench CLI benchmark output" width="880">
@@ -88,6 +88,7 @@ dns-bench uninstall
 ## quick start
 
 ```sh
+dns-bench score              # one graded number for the whole connection
 dns-bench -q -N              # report only, changes nothing, about 40 seconds
 dns-bench best -y            # quick benchmark, apply the winner
 dns-bench test example.com   # why does this one domain fail
@@ -264,6 +265,41 @@ dns-bench flush
 ```sh
 dns-bench flush
 ```
+
+### score
+
+One graded number for the whole connection, with a trophy when you earn one. **Read-only**.
+
+```
+dns-bench score [-q] [--no-upload]
+```
+
+```sh
+dns-bench score
+dns-bench score -q --no-upload
+```
+
+Five lines, each scored 0-100 and weighted into a total: **dns** (cached 50%, cold 30%, jitter 10%,
+loss 10%), **latency** (ICMP 70%, jitter 20%, loss 10%), **speed** (download 65%, upload 35%),
+**privacy** (NXDOMAIN honour 30%, DNSSEC 25%, egress match 25%, DoT 20%) and **stability** (DNS loss
+and ICMP loss, half each). In the total: dns 35%, latency 20%, speed 20%, privacy 15%, stability 10%.
+
+Grades are **S** 93+, **A** 85+, **B** 72+, **C** 58+, **D** 42+, **E** below. B and above get an
+ASCII trophy with the letter engraved. C and below get the two weakest lines plus the command that
+investigates each one, because a medal is not the useful part there.
+
+Three properties worth knowing:
+
+- **A line that cannot be measured is dropped, not zeroed.** No upload, ICMP blocked, speed test
+  refused: the remaining lines are reweighted, so a closed port is not scored as a bad connection.
+- **The privacy line is not a VPN penalty.** A tunnel is detected and named, and DNS is then measured
+  through it. What pulls the number down is a mismatch, for example queries leaving outside the
+  tunnel, not the tunnel itself.
+- **The bands are this tool's rubric, not a percentile.** They come from what a healthy cable or fibre
+  connection does. There is no survey of the internet in here, and the output says so on every run.
+
+`-q` drops the speed phases to 4 seconds and `--no-upload` skips the upload half. A full run takes
+about 30 seconds, most of it throughput.
 
 ### test
 
@@ -693,7 +729,7 @@ These apply to the commands that use them. zsh on the left, PowerShell on the ri
 | `-T LIST` | — | (test) record types to show |
 | `-s` | `-SkipServices` | skip the popular-service test |
 | `-c` | `-SkipGeo` | skip the continent test |
-| `-q` | `-Quick` | quick mode for benchmark commands; terse output for `ports`, `http`, `tls`, `trace`, `asn`, `ptr`, `leak`, `propagation`, `mtu`, `ecs`, `ifaces`, `listen`, `wifi`, `doctor` |
+| `-q` | `-Quick` | quick mode: 4-second speed phases for `speed` and `score`; terse output for `ports`, `http`, `tls`, `trace`, `asn`, `ptr`, `leak`, `propagation`, `mtu`, `ecs`, `ifaces`, `listen`, `wifi`, `doctor` |
 | `-P` | `-Privacy` | no external IP/geo lookups |
 | `-N` | `-ReportOnly` | never change DNS |
 | `-y` | `-Yes` | don't ask, apply the best resolver |
@@ -701,8 +737,8 @@ These apply to the commands that use them. zsh on the left, PowerShell on the ri
 | `--min-gain PCT` | — | `auto`: only switch if this much better (default 20) |
 | `--at HH:MM` | — | `cron`: time of day |
 | `--system` | — | `install`: use `/usr/local/bin` |
-| `--duration SECS` | `-Duration SECS` | (speed) seconds per phase, 2-60 (default 10, quick mode 4) |
-| `--no-upload` | `-NoUpload` | (speed) skip the upload test |
+| `--duration SECS` | `-Duration SECS` | (speed, score) seconds per phase, 2-60 (default 10, quick mode 4) |
+| `--no-upload` | `-NoUpload` | (speed, score) skip the upload test |
 | `--check` | `-Check` | (update) check versions only |
 | `--force` | `-Force` | (update) reinstall regardless of version |
 | `-h`, `--help` | `help` | print help |
@@ -784,7 +820,7 @@ The honest limits of **this** tool:
 
 ## features
 
-53 was the target; the list runs to 80 because the small things matter too. Everything here is
+53 was the target; the list runs to 86 because the small things matter too. Everything here is
 implemented, not planned.
 
 ### measurement (1-15)
@@ -901,6 +937,17 @@ implemented, not planned.
 | 78 | quick mode | `-q` for the benchmark; terse output for network commands |
 | 79 | per-command help | `help <command>` with usage and examples |
 | 80 | zsh bootstrap | `sh` or `bash` re-exec, offers to install zsh via the local package manager |
+
+### connection score (81-86)
+
+| # | feature | what it does |
+|---|---|---|
+| 81 | composite connection score | one 0-100 number from dns, latency, throughput, privacy and stability, weighted 35/20/20/15/10 |
+| 82 | letter grade and band | S/A/B/C/D/E plus a plain-English band, from fixed thresholds rather than a moving percentile |
+| 83 | trophy reveal | line-by-line ASCII trophy with the grade engraved, animated only on a terminal |
+| 84 | privacy as a scored line | NXDOMAIN honour, DNSSEC, resolver egress and DoT, so a hijacking resolver costs points instead of hiding |
+| 85 | drop-and-reweight | an unmeasurable line is removed and the rest reweighted, so a blocked port is not mistaken for a broken connection |
+| 86 | weakest-two advice | below B the two lowest lines are printed with the command that investigates each one |
 
 ## the cold-cache bug we fixed
 
@@ -1129,6 +1176,9 @@ applied resolver is appended to `~/.dns-bench-previous.txt`.
 Full history, with the reasoning and the regressions, is in [`CHANGELOG.md`](./CHANGELOG.md).
 The short version:
 
+**3.4.0** — added `score`: one graded number for the connection (dns, latency, throughput, privacy,
+stability), a letter grade, and an ASCII trophy when you earn one. Six new feature rows, 34 commands.
+
 **3.3.0** — fixed the cold-cache measurement bug (forked workers shared `$RANDOM`, so every resolver
 was asked the same three "cold" names and later probes were reading caches the earlier ones had just
 warmed). Added 13 network commands and `doctor`, a 53rd resolver, and PowerShell parity. README
@@ -1193,7 +1243,7 @@ script on a distro nobody has tried yet and tell us what broke.
 ## the mac app
 
 The mac app is **frozen at v1.0.0**. It was the original face of the project; the CLI is the project
-now. No further work is planned on it, and it is not updated with the v3.3.0 commands.
+now. No further work is planned on it, and it is not updated with the v3.4.0 commands.
 
 It still works as a window over the old probe engine, and it is still useful if you prefer clicking
 to typing.

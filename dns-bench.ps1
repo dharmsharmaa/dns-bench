@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = if ($NoProgress) { 'SilentlyContinue' } else { 'Continue' }
 
-$script:Version = '3.3.0'
+$script:Version = '3.4.0'
 $script:SelfPath = $PSCommandPath
 if (-not $script:SelfPath) { $script:SelfPath = $MyInvocation.MyCommand.Path }
 $script:SelfDir = Split-Path -Parent $script:SelfPath
@@ -178,6 +178,8 @@ Diagnose
   test DOMAIN         troubleshoot a domain: compare resolvers, records,
                       DNSSEC, TCP/HTTPS reachability
   info                network info only (ips, gateway, dns in use, geo)
+  score               one graded score for this connection: DNS, latency,
+                      throughput, privacy, stability
 
 Network
   speed               network speed test: latency, jitter, download, upload
@@ -288,6 +290,11 @@ $script:CommandHelp = @{
     Summary = 'Network info only: adapter, addresses, gateway, DNS in use, public IP, geo, VPN/proxy.'
     Examples = @('.\dns-bench.ps1 info', '.\dns-bench.ps1 info -Privacy')
   }
+  'score' = @{
+    Usage = 'score [-Duration SECS] [-NoUpload] [-Q]'
+    Summary = 'One graded score for this connection: DNS, latency, throughput, privacy, stability, with a 0-100 rubric and letter grade.'
+    Examples = @('.\dns-bench.ps1 score', '.\dns-bench.ps1 score -Q -NoUpload')
+  }
   'speed' = @{
     Usage = 'speed [-Duration SECS] [-NoUpload]'
     Summary = 'Latency/jitter plus parallel download and upload throughput against the Cloudflare edge (OVH fallback).'
@@ -387,7 +394,7 @@ $script:CommandHelp = @{
 
 $script:AllCommands = @(
   'run', 'best', 'set', 'reset', 'adblock', 'status', 'list', 'flush',
-  'test', 'info', 'speed',
+  'test', 'info', 'score', 'speed',
   'ports', 'http', 'tls', 'trace', 'asn', 'ptr', 'leak', 'propagation', 'mtu', 'ecs', 'ifaces', 'listen', 'wifi',
   'update', 'demo', 'doctor', 'help', 'version'
 )
@@ -3185,6 +3192,409 @@ function Invoke-Doctor {
 }
 
 # =====================================================================
+# connection score
+# =====================================================================
+# The bands below are this tool's own rubric, written from what a healthy
+# cable or fibre connection does. They are NOT a percentile against a survey
+# of the internet, because no such dataset for *your* machine exists and
+# inventing one would be the same class of error as the cold-cache bug.
+# Same lists and weights as dns-bench.zsh; do not retune one side alone.
+$script:ScoreFix = @{
+  dns       = 'try another resolver: .\dns-bench.ps1 run'
+  latency   = 'inspect the path: .\dns-bench.ps1 trace 1.1.1.1'
+  speed     = 'measure the link on its own: .\dns-bench.ps1 speed'
+  privacy   = 'find the weak link: .\dns-bench.ps1 leak; .\dns-bench.ps1 test example.com'
+  stability = 'chase the loss: .\dns-bench.ps1 wifi / .\dns-bench.ps1 ports 1.1.1.1'
+}
+
+$script:ScoreArt = @(
+  '     ___________     '
+  '     |         |     '
+  '     |    @    |     '
+  '     |         |     '
+  '      \       /      '
+  '       \_____/       '
+  '         | |         '
+  '         | |         '
+  '      ___| |___      '
+  '     |         |     '
+  '     |_________|     '
+)
+
+$script:ScoreV = @{}
+$script:ScoreD = @{}
+
+# Interpolate linearly over "value:score,value:score". Clamps at both ends;
+# a value below zero is "not measurable" and returns -1, as in zsh.
+function Get-BandScore([double]$Value, [string]$List) {
+  if ($Value -lt 0) { return -1 }
+  $points = @($List -split ',')
+  $pair = $points[0] -split ':'
+  $prevX = [double]$pair[0]
+  $prevS = [double]$pair[1]
+  if ($Value -le $prevX) { return $prevS }
+  for ($i = 1; $i -lt $points.Count; $i++) {
+    $pair = $points[$i] -split ':'
+    $curX = [double]$pair[0]
+    $curS = [double]$pair[1]
+    if ($Value -le $curX) {
+      return $prevS + ($curS - $prevS) * ($Value - $prevX) / ($curX - $prevX)
+    }
+    $prevX = $curX
+    $prevS = $curS
+  }
+  return $prevS
+}
+
+# Weighted mean over the non-negative inputs, renormalising the weights.
+# Returns -1 when every input is unmeasurable.
+function Get-MixScore {
+  param([double[]]$Scores, [double[]]$Weights)
+  $sum = 0.0
+  $weight = 0.0
+  for ($i = 0; $i -lt $Scores.Count; $i++) {
+    if ($Scores[$i] -ge 0) {
+      $sum += $Scores[$i] * $Weights[$i]
+      $weight += $Weights[$i]
+    }
+  }
+  if ($weight -gt 0) { return $sum / $weight }
+  return -1
+}
+
+# awk's printf "%.1f" rounds half away from zero; .NET's format string does too.
+function ConvertTo-OneDecimal([double]$Value) {
+  $culture = [Globalization.CultureInfo]::InvariantCulture
+  return [double]::Parse($Value.ToString('0.0', $culture), $culture)
+}
+
+function Format-ScoreBar([int]$Percent, [int]$Width = 20) {
+  if ($Percent -lt 0) { $Percent = 0 }
+  if ($Percent -gt 100) { $Percent = 100 }
+  $fill = [int][math]::Floor($Percent * $Width / 100)
+  $out = ''
+  for ($i = 1; $i -le $Width; $i++) {
+    if ($i -le $fill) { $out += '#' } else { $out += '.' }
+  }
+  return $out
+}
+
+function Get-ScoreColour([int]$Percent) {
+  if ($Percent -ge 85) { return 'Green' }
+  if ($Percent -ge 70) { return 'Cyan' }
+  if ($Percent -ge 55) { return 'Yellow' }
+  return 'Red'
+}
+
+function Get-ScoreBandName([int]$Total) {
+  if ($Total -ge 93) { return 'top tier' }
+  if ($Total -ge 85) { return 'strong' }
+  if ($Total -ge 72) { return 'above typical' }
+  if ($Total -ge 58) { return 'typical' }
+  if ($Total -ge 42) { return 'below typical' }
+  return 'weak'
+}
+
+function Get-ScoreGrade([int]$Total) {
+  if ($Total -ge 93) { return 'S' }
+  if ($Total -ge 85) { return 'A' }
+  if ($Total -ge 72) { return 'B' }
+  if ($Total -ge 58) { return 'C' }
+  if ($Total -ge 42) { return 'D' }
+  return 'E'
+}
+
+# Unmeasurable values print as "?" rather than -1 inside a description.
+function Format-ScoreCount($Value) {
+  if ($null -eq $Value -or [double]$Value -lt 0) { return '?' }
+  return [string]([int][math]::Truncate([double]$Value))
+}
+
+function Format-ScoreOne($Value) {
+  if ($null -eq $Value -or [double]$Value -lt 0) { return '?' }
+  return ([double]$Value).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Pure scoring maths: raw metrics in, raw sub-scores out. Kept separate from
+# Invoke-Score so the numbers can be checked against the zsh implementation.
+function Get-ConnectionScore {
+  param([hashtable]$Metric)
+  $cachedS = Get-BandScore ([double]$Metric['cached']) '5:100,10:92,20:82,40:66,80:46,150:26,300:8'
+  $coldS   = Get-BandScore ([double]$Metric['cold'])   '20:100,50:86,100:66,200:42,400:20,800:6'
+  $djitS   = Get-BandScore ([double]$Metric['djit'])   '1:100,5:86,15:62,30:38,60:16'
+  $dlossS  = Get-BandScore ([double]$Metric['dloss'])  '0:100,1:88,3:62,6:38,12:14,25:0'
+  $icmpS   = Get-BandScore ([double]$Metric['icmp'])   '5:100,15:94,30:84,60:66,120:42,250:18'
+  $ijitS   = Get-BandScore ([double]$Metric['ijit'])   '2:100,8:84,20:60,40:34'
+  $ilossS  = Get-BandScore ([double]$Metric['iloss'])  '0:100,2:66,5:34,10:10'
+  $downS   = Get-BandScore ([double]$Metric['down'])   '2:6,5:16,10:30,25:52,50:68,100:80,250:92,500:100'
+  $upS     = Get-BandScore ([double]$Metric['up'])     '1:6,5:30,10:50,25:70,50:86,100:100'
+
+  # A skipped external check is neutral, not a failure.
+  $nxS = if ([double]$Metric['nx'] -lt 0) { 50.0 } else { [double]$Metric['nx'] }
+  $dnssecS = if ([double]$Metric['dnssec'] -lt 0) { 50.0 } else { [double]$Metric['dnssec'] }
+  $egressS = if ([double]$Metric['egress'] -lt 0) { 50.0 } else { [double]$Metric['egress'] }
+  $dotS = if ([double]$Metric['dot'] -lt 0) { 50.0 } else { [double]$Metric['dot'] }
+
+  $dns  = Get-MixScore -Scores @($cachedS, $coldS, $djitS, $dlossS) -Weights @(0.50, 0.30, 0.10, 0.10)
+  $net  = Get-MixScore -Scores @($icmpS, $ijitS, $ilossS, -1) -Weights @(0.70, 0.20, 0.10, 0)
+  $spd  = Get-MixScore -Scores @($downS, $upS, -1, -1) -Weights @(0.65, 0.35, 0, 0)
+  $priv = Get-MixScore -Scores @($nxS, $dnssecS, $egressS, $dotS) -Weights @(0.30, 0.25, 0.25, 0.20)
+  $stab = Get-MixScore -Scores @($dlossS, $ilossS, -1, -1) -Weights @(0.50, 0.50, 0, 0)
+
+  $total = Get-MixScore -Scores @($dns, $net, $spd, $priv, $stab) -Weights @(0.35, 0.20, 0.20, 0.15, 0.10)
+  if ($total -lt 0) { $total = 0 }
+
+  [pscustomobject]@{
+    Dns = $dns; Latency = $net; Speed = $spd; Privacy = $priv; Stability = $stab; Total = $total
+  }
+}
+
+# Animation is only visible on an interactive console, and off for -NoProgress,
+# -Quick and terse (-Q), matching PROGRESS_TTY/TERSE on the zsh side.
+function Test-ScoreAnimated {
+  if ($NoProgress -or $Quick -or $Q) { return $false }
+  try {
+    if ([Console]::IsOutputRedirected) { return $false }
+  } catch { return $false }
+  return $true
+}
+
+function Show-ScoreReport {
+  param([switch]$Animate)
+  $metrics = @('dns', 'latency', 'speed', 'privacy', 'stability')
+  $total = [double]$script:ScoreV['total']
+  $totalText = (ConvertTo-OneDecimal $total).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture)
+  $pct = [int][math]::Truncate([double]$totalText)
+  $grade = Get-ScoreGrade $pct
+  $band = Get-ScoreBandName $pct
+
+  Write-Host ''
+  foreach ($m in $metrics) {
+    $value = [double]$script:ScoreV[$m]
+    if ($value -lt 0) { continue }
+    $mp = [int][math]::Truncate((ConvertTo-OneDecimal $value))
+    $col = Get-ScoreColour $mp
+    Write-Host '  ' -NoNewline
+    Write-Host ($m.PadRight(10)) -NoNewline
+    Write-Host ' ' -NoNewline
+    Write-Host (Format-ScoreBar $mp 20) -ForegroundColor $col -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host ('{0,3}' -f $mp) -ForegroundColor White -NoNewline
+    Write-Host ('   {0}' -f $script:ScoreD[$m]) -ForegroundColor DarkGray
+    if ($Animate) { Start-Sleep -Milliseconds 50 }
+  }
+
+  $col = Get-ScoreColour $pct
+  Write-Host ''
+  if ($Animate) {
+    for ($step = 1; $step -le 20; $step++) {
+      $stepPct = [int][math]::Floor($pct * $step / 20)
+      Write-Host "`r  " -NoNewline
+      Write-Host ('total'.PadRight(10)) -NoNewline
+      Write-Host ' ' -NoNewline
+      Write-Host (Format-ScoreBar $stepPct 20) -ForegroundColor $col -NoNewline
+      Write-Host '  ' -NoNewline
+      Write-Host ('{0,3}' -f $stepPct) -ForegroundColor White -NoNewline
+      Write-Host '  ' -NoNewline
+      Start-Sleep -Milliseconds 25
+    }
+    Write-Host "`r  " -NoNewline
+  } else {
+    Write-Host '  ' -NoNewline
+  }
+  Write-Host ('total'.PadRight(10)) -NoNewline
+  Write-Host ' ' -NoNewline
+  Write-Host (Format-ScoreBar $pct 20) -ForegroundColor $col -NoNewline
+  Write-Host '  ' -NoNewline
+  Write-Host ('{0,3}' -f $pct) -ForegroundColor White -NoNewline
+  Write-Host ('   {0}' -f $band) -ForegroundColor White
+
+  if ($pct -ge 72) {
+    Write-Host ''
+    if ($Animate) { Start-Sleep -Milliseconds 120 }
+    foreach ($line in $script:ScoreArt) {
+      $art = $line.Replace('@', $grade)
+      Write-Host "  $art" -ForegroundColor $col
+      if ($Animate) { Start-Sleep -Milliseconds 45 }
+    }
+  } else {
+    Write-Host ''
+    Write-Note 'no trophy this run, but the weakest lines are specific:'
+    $ranked = @()
+    foreach ($m in $metrics) {
+      $value = [double]$script:ScoreV[$m]
+      if ($value -lt 0) { continue }
+      $ranked += [pscustomobject]@{
+        Name = $m
+        Int = [int][math]::Truncate((ConvertTo-OneDecimal $value))
+      }
+    }
+    $ranked = @($ranked | Sort-Object Int)
+    $rank = 0
+    foreach ($entry in $ranked) {
+      $rank++
+      if ($rank -gt 2) { break }
+      Write-Host '  ' -NoNewline
+      Write-Host '-' -ForegroundColor Yellow -NoNewline
+      Write-Host (' {0} ' -f $entry.Name) -NoNewline
+      Write-Host ('({0}%)' -f $entry.Int) -ForegroundColor DarkGray -NoNewline
+      Write-Host (': {0}' -f $script:ScoreFix[$entry.Name])
+    }
+  }
+
+  Write-Host ''
+  Write-Host '  ' -NoNewline
+  Write-Host $grade -ForegroundColor White -NoNewline
+  Write-Host ('   {0}/100   ' -f $totalText) -NoNewline
+  Write-Host $band -ForegroundColor DarkGray
+  Write-Host ''
+  $pos = [int][math]::Floor(($pct * 51 + 50) / 100)
+  Write-Host '  0        20        40        60        80        100' -ForegroundColor DarkGray
+  Write-Host '  |--------|---------|---------|---------|---------|' -ForegroundColor DarkGray
+  Write-Host ('  {0}^ {1} {2}' -f (' ' * $pos), $totalText, $band) -ForegroundColor $col
+}
+
+# Resolver # for the current address, matching resolver_of_ip in zsh: local
+# gateway/system entries are skipped, 0 means "not in the public list".
+function Get-ResolverIndex([string]$Address) {
+  for ($i = 0; $i -lt $script:Resolvers.Count; $i++) {
+    $resolver = $script:Resolvers[$i]
+    if ($resolver.Kind -eq 'C') { continue }
+    if ((@($resolver.V4) -contains $Address) -or (@($resolver.V6) -contains $Address)) { return $i + 1 }
+  }
+  return 0
+}
+
+function Invoke-Score {
+  $adapter = Get-ActiveAdapter
+  if (-not $adapter) {
+    Write-Bad '  no default route: you appear to be offline'
+    return
+  }
+  Build-Resolvers
+  $gateway = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1).NextHop
+  $systemDns = @(Get-SystemDns)
+  $cur = if ($systemDns.Count -gt 0) { $systemDns[0] } else { $gateway }
+  if (-not $cur) {
+    Write-Bad '  no resolver configured: nothing to score'
+    return
+  }
+  $idx = Get-ResolverIndex -Address $cur
+  $vpnAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
+    Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -match 'VPN|WireGuard|OpenVPN|Tailscale|TAP-Windows|Wintun' } |
+    Select-Object -First 1
+  $tunnel = [bool]$vpnAdapter
+  $tunnelName = if ($vpnAdapter) { $vpnAdapter.Name } else { $adapter.Name }
+
+  Write-Host ("dns-bench {0}" -f $script:Version) -ForegroundColor White -NoNewline
+  Write-Host '  connection score' -ForegroundColor DarkGray
+  Write-Kv 'Resolver' $(if ($idx -gt 0) { "$cur (#$idx)" } else { $cur })
+  Write-Kv 'Target' ("{0}, {1} samples" -f $script:Domain, $Samples)
+  $est = $Duration + 10
+  if (-not $NoUpload) { $est = $Duration * 2 + 10 }
+  Write-Kv 'Measured' ("dns, latency, throughput, privacy (about {0}s)" -f $est)
+  if ($tunnel) {
+    Write-Kv 'VPN' ("tunnel {0}: DNS is scored through the tunnel, not around it" -f $tunnelName)
+  } else {
+    Write-Kv 'VPN' 'none detected'
+  }
+
+  $cached = Get-DnsStats -Server $cur -Mode 'cached' -Count $Samples -ResolverIndex $idx
+  $cold = Get-DnsStats -Server $cur -Mode 'cold' -Count 3 -ResolverIndex $idx
+
+  $cachedMs = if ($null -ne $cached.Median) { [double]$cached.Median } else { -1.0 }
+  $coldMs = if ($null -ne $cold.Median) { [double]$cold.Median } else { -1.0 }
+  $dnsLoss = if ($null -ne $cached.Loss) { [double]$cached.Loss } else { -1.0 }
+  $dnsJit = -1.0
+  if ($null -ne $cached.Min -and $null -ne $cached.Max) {
+    $dnsJit = ConvertTo-OneDecimal ([double]$cached.Max - [double]$cached.Min)
+  }
+
+  $icmp = Get-PingDetail -Target '1.1.1.1' -Count 5
+  if ($null -eq $icmp.Avg) { $icmp = Get-PingDetail -Target '8.8.8.8' -Count 5 }
+  $lat = if ($null -ne $icmp.Avg) { [double]$icmp.Avg } else { -1.0 }
+  $ijit = [double]$icmp.Jitter
+  $iloss = [double]$icmp.Loss
+
+  $down = -1.0
+  $up = -1.0
+  $downloadFailed = $false
+  $curl = Get-CurlExe
+  if ($curl) {
+    $dl = Measure-SpeedTransfer -Curl $curl -Mode 'download' -Seconds $Duration -Streams 4
+    if ($dl.Ok) { $down = [double]$dl.Mbps } else { $downloadFailed = $true }
+    if (-not $NoUpload) {
+      $ul = Measure-SpeedTransfer -Curl $curl -Mode 'upload' -Seconds $Duration -Streams 3
+      if ($ul.Ok) { $up = [double]$ul.Mbps }
+    }
+  } else {
+    Write-Warn2 'curl.exe is required for the speed test; throughput is left out of the score.'
+    $downloadFailed = $true
+  }
+
+  $nx = Test-NxHijack -Server $cur -Index $idx
+  $dnssec = Test-Dnssec -Server $cur
+  $dotResult = Test-TcpPort -Target $cur -Port 853 -TimeoutMs 3000
+  $dot = if ($null -ne $dotResult) { 'yes' } else { 'no' }
+
+  $public = $null
+  $egress = $null
+  if (-not $Privacy) {
+    $public = Get-PublicIp
+    $egress = Get-ResolverEgress -Server $cur
+  }
+
+  $nxScore = -1.0
+  switch ($nx) { 'ok' { $nxScore = 100.0 } 'HIJACK' { $nxScore = 0.0 } }
+  $dnssecScore = -1.0
+  switch ($dnssec) { 'yes' { $dnssecScore = 100.0 } 'no' { $dnssecScore = 25.0 } }
+  $dotScore = if ($dot -eq 'yes') { 100.0 } else { 40.0 }
+  $egressScore = -1.0
+  if (-not $Privacy -and $public -and $egress) {
+    if ($public -eq $egress) { $egressScore = 100.0 } else { $egressScore = 30.0 }
+  }
+
+  $metric = @{
+    cached = $cachedMs; cold = $coldMs; djit = $dnsJit; dloss = $dnsLoss
+    icmp = $lat; ijit = $ijit; iloss = $iloss; down = $down; up = $up
+    nx = $nxScore; dnssec = $dnssecScore; dot = $dotScore; egress = $egressScore
+  }
+  $score = Get-ConnectionScore -Metric $metric
+
+  $script:ScoreV = @{
+    dns = $score.Dns; latency = $score.Latency; speed = $score.Speed
+    privacy = $score.Privacy; stability = $score.Stability; total = $score.Total
+  }
+  $speedDesc = if ($NoUpload) {
+    'down {0} Mbps, upload skipped' -f (Format-ScoreOne $down)
+  } else {
+    'down {0} Mbps, up {1} Mbps' -f (Format-ScoreOne $down), (Format-ScoreOne $up)
+  }
+  $script:ScoreD = @{
+    dns = 'cached {0} ms, cold {1} ms, {2}% loss' -f (Format-ScoreCount $cachedMs), (Format-ScoreCount $coldMs), (Format-ScoreCount $dnsLoss)
+    latency = '{0} ms, jitter {1} ms' -f (Format-ScoreOne $lat), (Format-ScoreOne $ijit)
+    speed = $speedDesc
+    privacy = 'NXDOMAIN {0}, DNSSEC {1}, DoT {2}' -f $nx, $dnssec, $dot
+    stability = '{0}% DNS loss, {1}% ICMP loss' -f (Format-ScoreCount $dnsLoss), (Format-ScoreCount $iloss)
+  }
+
+  if (Test-ScoreAnimated) { Show-ScoreReport -Animate } else { Show-ScoreReport }
+
+  Write-Host ''
+  if ($tunnel) {
+    Write-Note ("VPN detected: the privacy line scores the resolver you reach through {0}. A leak shows up as a mismatch, not as a lower score by itself." -f $tunnelName)
+  }
+  if ($Privacy) {
+    Write-Note 'Privacy mode: external IP checks were skipped, so the egress item is neutral.'
+  }
+  if ($downloadFailed) {
+    Write-Note 'Throughput unavailable, so the speed line was left out of the total and the rest was reweighted.'
+  }
+  Write-Note 'Bands are this tool''s rubric for a healthy connection, not a survey of the internet. Run twice before reading a 3-point difference.'
+}
+
+# =====================================================================
 # dispatch
 # =====================================================================
 if ($Command -eq 'help') {
@@ -3194,7 +3604,7 @@ if ($Command -eq 'help') {
 }
 if ($Command -eq 'version') { Write-Host "dns-bench $($script:Version) (PowerShell)"; exit 0 }
 
-$windowsOnly = @('run', 'info', 'test', 'best', 'adblock', 'set', 'reset', 'status', 'list', 'flush')
+$windowsOnly = @('run', 'info', 'test', 'score', 'best', 'adblock', 'set', 'reset', 'status', 'list', 'flush')
 if ($windowsOnly -contains $Command -and $Command -ne 'flush' -and -not (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue)) {
   Write-Bad 'This command needs Windows: Resolve-DnsName is not available here.'
   Write-Host 'Use dns-bench.zsh on macOS or Linux. The speed test works everywhere PowerShell 7 runs:'
@@ -3215,6 +3625,7 @@ try {
       Show-NetworkInfo
     }
     'test' { Invoke-Test }
+    'score' { Invoke-Score }
     'best' { Invoke-Best }
     'adblock' { Invoke-Adblock }
     'set' { Invoke-Set }
