@@ -1,0 +1,23 @@
+version: 2
+
+updates:
+  # The Mac app is frozen at v1.0.0. These bumps are low priority: nothing in
+  # source/app ships with the CLI, and a breaking Electron major is a reason to
+  # close the PR, not to spend a weekend on it.
+  - package-ecosystem: "npm"
+    directory: "/source/app"
+    schedule:
+      interval: "weekly"
+    allow:
+      - dependency-type: "development"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "app deps"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

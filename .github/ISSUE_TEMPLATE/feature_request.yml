@@ -1,0 +1,84 @@
+name: Feature request
+description: A command, flag or measurement that dns-bench should have.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One request per issue, please. A feature that needs a new dependency is almost certainly
+        not going to land — the whole point is that this runs on a fresh machine with nothing
+        installed.
+
+        The Mac app in `source/app` is **frozen at v1.0.0**. Requests about the app UI will be read
+        and closed; the CLI is the project.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to find out, and what does dns-bench fail to tell you today? Describe the situation, not the solution.
+      placeholder: When my VPN is up, `dns-bench test` says the resolver is fine but pages still fail, and I cannot tell whether the queries are leaving through the tunnel.
+    validations:
+      required: true
+
+  - type: input
+    id: command-name
+    attributes:
+      label: Proposed command or flag
+      description: The command name and any flags, as you would type them.
+      placeholder: dns-bench path
+    validations:
+      required: true
+
+  - type: dropdown
+    id: group
+    attributes:
+      label: Which group does it belong to?
+      description: This is how it will appear in `dns-bench help`.
+      options:
+        - benchmark
+        - dns control
+        - diagnose
+        - network
+        - maintenance
+    validations:
+      required: true
+
+  - type: dropdown
+    id: read-only
+    attributes:
+      label: Should it be read-only?
+      description: Read-only means no DNS change, no cache flush, no file write, no schedule. It should be the default answer.
+      options:
+        - "Yes — reads state, changes nothing"
+        - "No — it mutates, and says so before it does"
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        **Dependencies.** `dns-bench` ships with no runtime dependencies past `dig`, `curl`, `ping`,
+        `awk`, `perl`, `openssl` and the OS's own networking tools. Anything else turns a
+        single-file script into an install problem, and install problems are how tools die.
+
+  - type: dropdown
+    id: dependency
+    attributes:
+      label: Does this need a new dependency?
+      description: If yes, say which one and what it buys that the OS tools cannot do. Expect to be asked for the version without it.
+      options:
+        - "No"
+        - "Yes — and I have read the warning above"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What should the output look like?
+      description: A sketch of the columns or lines you want. Rough is fine.
+      render: shell
+    validations:
+      required: false

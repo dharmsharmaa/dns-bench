@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-  dns-bench 3.2 for Windows
+  dns-bench 3.3 for Windows
   Benchmark public DNS resolvers, inspect your network, troubleshoot domains,
   and switch DNS on your active adapter.
 
@@ -31,17 +31,73 @@ param(
   [switch]$Check,
   [switch]$Force,
   [ValidateRange(2, 60)][int]$Duration = 10,
-  [switch]$NoUpload
+  [switch]$NoUpload,
+  [switch]$Q,
+  [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = if ($NoProgress) { 'SilentlyContinue' } else { 'Continue' }
 
-$script:Version = '3.2.0'
+$script:Version = '3.3.0'
 $script:SelfPath = $PSCommandPath
 if (-not $script:SelfPath) { $script:SelfPath = $MyInvocation.MyCommand.Path }
 $script:SelfDir = Split-Path -Parent $script:SelfPath
 $script:OnWindows = ($env:OS -eq 'Windows_NT')
+
+$script:OSKind = 'windows'
+if (-not $script:OnWindows) {
+  $script:OSKind = 'linux'
+  try {
+    $unameOut = (& uname -s 2>$null)
+    if ($unameOut -eq 'Darwin') { $script:OSKind = 'macos' }
+  } catch { }
+}
+
+# Base36 helper and one salt per run. Cold names embed the run salt, the
+# resolver index and the sample index, so no two probes in the same run and
+# no two runs ever ask for the same "cold" name. Without that, a name warmed
+# by one resolver can be answered from cache by another (Verisign and
+# Neustar share the UltraDNS backend), which silently turns a cold
+# measurement into a cache hit and makes the score incomparable.
+function ConvertTo-Base36([int64]$Value) {
+  $digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+  if ($Value -le 0) { return '0' }
+  $text = ''
+  while ($Value -gt 0) {
+    $text = $digits[[int]($Value % 36)] + $text
+    $Value = [int64][math]::Floor($Value / 36)
+  }
+  return $text
+}
+
+function Get-RunSalt {
+  $epoch = [int64](([DateTime]::UtcNow - [datetime]'1970-01-01').TotalMilliseconds)
+  $value = $epoch * 1000 + (Get-Random -Minimum 0 -Maximum 1000)
+  $text = ConvertTo-Base36 $value
+  if ($text.Length -gt 6) { $text = $text.Substring($text.Length - 6) }
+  return $text
+}
+
+$script:RunSalt = Get-RunSalt
+
+# Unique names are what make the cold number comparable across resolvers:
+# a name warmed by any earlier probe cannot be answered from cache here.
+function New-ColdName {
+  param([int]$ResolverIndex, [int]$SampleIndex)
+  $tlds = @('com', 'net', 'org')
+  $tld = $tlds[(Get-Random -Maximum 3)]
+  $name = 'cold-{0}-r{1}-{2}.{3}' -f $script:RunSalt, $ResolverIndex, $SampleIndex, $tld
+  if ($env:DNSBENCH_DEBUG_COLD) { [Console]::Error.WriteLine("cold name: $name") }
+  return $name
+}
+
+function New-NxProbeName {
+  param([int]$ResolverIndex)
+  $name = 'nx-{0}-r{1}.com' -f $script:RunSalt, $ResolverIndex
+  if ($env:DNSBENCH_DEBUG_COLD) { [Console]::Error.WriteLine("nx name: $name") }
+  return $name
+}
 
 # Where `update` pulls the latest version from.
 # Override per run with:  $env:DNSBENCH_UPDATE_URL = 'https://...'
@@ -103,23 +159,47 @@ function Show-Usage {
 dns-bench (Windows / PowerShell): benchmark DNS resolvers, check your network,
 troubleshoot domains.
 
-Usage: .\dns-bench.ps1 [command] [options]
+Usage: .\dns-bench.ps1 <command> [args] [options]
+       .\dns-bench.ps1 help <command>
 
-Commands
+Benchmark
   run                 full benchmark + tables, then asks what to apply (default)
-  info                network info only (ips, gateway, dns in use, geo)
-  test DOMAIN         troubleshoot a domain: compare resolvers, records,
-                      DNSSEC, TCP/HTTPS reachability
   best                quick benchmark, apply the fastest unfiltered resolver
-  adblock [off]       apply the fastest ad-blocking resolver (off = automatic dns)
+
+DNS control
   set NAME|#          apply a resolver without benchmarking (set cloudflare)
   reset               back to automatic dns (DHCP / router)
+  adblock [off]       apply the fastest ad-blocking resolver (off = automatic dns)
   status              what dns you use now, script location
   list                print the resolver list
-  speed               network speed test: latency, jitter, download, upload
   flush               flush the DNS cache
-  demo                print sample output for screenshots (no network, no changes)
+
+Diagnose
+  test DOMAIN         troubleshoot a domain: compare resolvers, records,
+                      DNSSEC, TCP/HTTPS reachability
+  info                network info only (ips, gateway, dns in use, geo)
+
+Network
+  speed               network speed test: latency, jitter, download, upload
+  ports HOST [PORTS]  TCP connect check, default ports 22 53 80 443 853 3306
+                      5432 6379 8080 (comma or space separated)
+  http URL            HTTP code + timing: dns, connect, tls, ttfb, total
+  tls HOST[:PORT]     certificate subject CN, issuer, dates, days left, SANs
+  trace HOST          traceroute, numeric, 16 hops
+  asn HOST|IP         ASN, prefix, country, registry, org
+  ptr IP              PTR records + forward-confirmed reverse DNS
+  leak                resolver egress vs your public IP
+  propagation DOMAIN [TYPE]  compare the answer across 8 public resolvers
+  mtu HOST            path MTU by DF ping bisection
+  ecs [HOST]          does EDNS Client Subnet change the answer?
+  ifaces              interfaces: state, MTU, MAC, IPv4, IPv6, media
+  listen              listening TCP sockets and their processes
+  wifi                SSID, BSSID, channel, band, signal, rate, security
+
+Maintenance
   update              pull the latest version of this script from GitHub
+  demo                print sample output for screenshots (no network, no changes)
+  doctor              dependency checklist; exits 1 if something required is missing
   version, help
 
 Options
@@ -133,6 +213,7 @@ Options
   -SkipServices    skip the popular-service test
   -SkipGeo         skip the continent latency test
   -Quick           -SkipServices -SkipGeo, 3 samples, speed phases 4 s
+  -Q               terse output for the network commands (alias: -q)
   -Privacy         no external ip/geo lookups
   -ReportOnly      never change DNS
   -Yes             don't ask, apply the best resolver
@@ -146,11 +227,235 @@ Examples
   .\dns-bench.ps1 -Quick -ReportOnly
   .\dns-bench.ps1 test github.com
   .\dns-bench.ps1 set cloudflare
-  .\dns-bench.ps1 update -Check
+  .\dns-bench.ps1 help ports
 
 Env: DNSBENCH_UPDATE_URL   override the GitHub raw URL used by update
      DNSBENCH_CSV_DIR      where auto-saved CSVs go (default: next to the script)
+     DNSBENCH_DEBUG_COLD=1 print generated cold/NX names to stderr
 '@ | Write-Host
+}
+
+# Per-command help: usage, one paragraph, two examples. Keep names/flags the
+# same as dns-bench.zsh so a command reads the same on either platform.
+$script:CommandHelp = @{
+  'run' = @{
+    Usage = 'run [options]'
+    Summary = 'Full benchmark: network info, cached/cold/jitter/loss, feature matrix, continents, popular services, then offers to apply a resolver.'
+    Examples = @('.\dns-bench.ps1', '.\dns-bench.ps1 run -Quick -ReportOnly -Samples 3')
+  }
+  'best' = @{
+    Usage = 'best'
+    Summary = 'Quick benchmark of the unfiltered resolvers and apply the fastest one (asks unless -Yes).'
+    Examples = @('.\dns-bench.ps1 best', '.\dns-bench.ps1 best -ReportOnly')
+  }
+  'set' = @{
+    Usage = 'set NAME|#'
+    Summary = 'Apply a resolver by name fragment or by its # in the list, without benchmarking.'
+    Examples = @('.\dns-bench.ps1 set cloudflare', '.\dns-bench.ps1 set 4')
+  }
+  'reset' = @{
+    Usage = 'reset'
+    Summary = 'Put DNS back to automatic (DHCP/router) on the active adapter and flush the cache.'
+    Examples = @('.\dns-bench.ps1 reset', '.\dns-bench.ps1 reset')
+  }
+  'adblock' = @{
+    Usage = 'adblock [off]'
+    Summary = 'Benchmark ad-blocking resolvers, verify they really block, apply the fastest. "off" returns to automatic DNS.'
+    Examples = @('.\dns-bench.ps1 adblock', '.\dns-bench.ps1 adblock off')
+  }
+  'status' = @{
+    Usage = 'status'
+    Summary = 'Show the adapter, DNS source, DNS in use, script path and update URL.'
+    Examples = @('.\dns-bench.ps1 status', '.\dns-bench.ps1 status')
+  }
+  'list' = @{
+    Usage = 'list'
+    Summary = 'Print every resolver with its #, kind, region and addresses.'
+    Examples = @('.\dns-bench.ps1 list', '.\dns-bench.ps1 list')
+  }
+  'flush' = @{
+    Usage = 'flush'
+    Summary = 'Flush the Windows DNS cache (Clear-DnsClientCache + ipconfig /flushdns).'
+    Examples = @('.\dns-bench.ps1 flush', '.\dns-bench.ps1 flush')
+  }
+  'test' = @{
+    Usage = 'test DOMAIN'
+    Summary = 'Troubleshoot a domain: same query through several resolvers, records, DNSSEC, TCP/HTTPS reachability and a verdict.'
+    Examples = @('.\dns-bench.ps1 test github.com', '.\dns-bench.ps1 test example.org')
+  }
+  'info' = @{
+    Usage = 'info'
+    Summary = 'Network info only: adapter, addresses, gateway, DNS in use, public IP, geo, VPN/proxy.'
+    Examples = @('.\dns-bench.ps1 info', '.\dns-bench.ps1 info -Privacy')
+  }
+  'speed' = @{
+    Usage = 'speed [-Duration SECS] [-NoUpload]'
+    Summary = 'Latency/jitter plus parallel download and upload throughput against the Cloudflare edge (OVH fallback).'
+    Examples = @('.\dns-bench.ps1 speed', '.\dns-bench.ps1 speed -Duration 5 -NoUpload')
+  }
+  'ports' = @{
+    Usage = 'ports HOST [PORTS]'
+    Summary = 'TCP connect check. State is open, closed (refused) or filtered (no answer in 2 s). PORTS defaults to 22 53 80 443 853 3306 5432 6379 8080; comma or space separated.'
+    Examples = @('.\dns-bench.ps1 ports example.com', '.\dns-bench.ps1 ports 1.1.1.1 53,443,853')
+  }
+  'http' = @{
+    Usage = 'http URL'
+    Summary = 'HTTP status plus timing breakdown in ms: dns, connect, tls, ttfb, total; also size, redirects and final URL. Uses curl.'
+    Examples = @('.\dns-bench.ps1 http https://example.com', '.\dns-bench.ps1 http github.com')
+  }
+  'tls' = @{
+    Usage = 'tls HOST[:PORT]'
+    Summary = 'Certificate chain endpoint check: subject CN, issuer, notBefore, notAfter, days left, SAN count, protocol. Warns under 21 days. Prefers openssl s_client, falls back to curl -v.'
+    Examples = @('.\dns-bench.ps1 tls example.com', '.\dns-bench.ps1 tls 1.1.1.1:443')
+  }
+  'trace' = @{
+    Usage = 'trace HOST'
+    Summary = 'Path trace, numeric, 16 hops, one probe per hop (traceroute, tracepath, or tracert on Windows).'
+    Examples = @('.\dns-bench.ps1 trace 1.1.1.1', '.\dns-bench.ps1 trace example.com')
+  }
+  'asn' = @{
+    Usage = 'asn HOST|IP'
+    Summary = 'ASN, prefix, country, registry and org for an address, via the Team Cymru DNS service (no whois binary).'
+    Examples = @('.\dns-bench.ps1 asn 8.8.8.8', '.\dns-bench.ps1 asn github.com')
+  }
+  'ptr' = @{
+    Usage = 'ptr IP'
+    Summary = 'PTR records for an IPv4/IPv6 address plus forward-confirmed reverse DNS (yes/no).'
+    Examples = @('.\dns-bench.ps1 ptr 8.8.8.8', '.\dns-bench.ps1 ptr 1.1.1.1')
+  }
+  'leak' = @{
+    Usage = 'leak'
+    Summary = 'Compare your public IP with the egress IP the system resolver and each configured resolver actually query from; flags a mismatch.'
+    Examples = @('.\dns-bench.ps1 leak', '.\dns-bench.ps1 leak -Privacy')
+  }
+  'propagation' = @{
+    Usage = 'propagation DOMAIN [TYPE]'
+    Summary = 'Ask 8 public resolvers for the same record, group identical answer sets and print an agreement summary. TYPE defaults to A.'
+    Examples = @('.\dns-bench.ps1 propagation example.com', '.\dns-bench.ps1 propagation example.com AAAA')
+  }
+  'mtu' = @{
+    Usage = 'mtu HOST'
+    Summary = 'Discover the path MTU with a don''t-fragment ping bisection from 1500 bytes down.'
+    Examples = @('.\dns-bench.ps1 mtu 1.1.1.1', '.\dns-bench.ps1 mtu example.com')
+  }
+  'ecs' = @{
+    Usage = 'ecs [HOST]'
+    Summary = 'EDNS Client Subnet check: compare +subnet=0 with +subnet=<your public ip>/24 on 8.8.8.8 and report whether ECS changes the answer. Needs dig.'
+    Examples = @('.\dns-bench.ps1 ecs', '.\dns-bench.ps1 ecs example.com')
+  }
+  'ifaces' = @{
+    Usage = 'ifaces'
+    Summary = 'Interface inventory: state, MTU, MAC, IPv4, IPv6 and media. No DNS queries, works offline.'
+    Examples = @('.\dns-bench.ps1 ifaces', '.\dns-bench.ps1 ifaces -Q')
+  }
+  'listen' = @{
+    Usage = 'listen'
+    Summary = 'Listening TCP sockets: protocol, local address:port and owning process. Get-NetTCPConnection on Windows, lsof or netstat elsewhere.'
+    Examples = @('.\dns-bench.ps1 listen', '.\dns-bench.ps1 listen -Q')
+  }
+  'wifi' = @{
+    Usage = 'wifi'
+    Summary = 'Wireless link detail: SSID, BSSID, channel, band, RSSI/signal, noise, tx rate and security.'
+    Examples = @('.\dns-bench.ps1 wifi', '.\dns-bench.ps1 wifi -Q')
+  }
+  'doctor' = @{
+    Usage = 'doctor'
+    Summary = 'Dependency and install checklist: every tool it uses, privilege status, installed copy, schedule, log tail and version. Exits 1 if a required dependency is missing. Works offline.'
+    Examples = @('.\dns-bench.ps1 doctor', '.\dns-bench.ps1 doctor')
+  }
+  'demo' = @{
+    Usage = 'demo'
+    Summary = 'Print sample output for screenshots. No network, no changes.'
+    Examples = @('.\dns-bench.ps1 demo', '.\dns-bench.ps1 demo -SkipServices')
+  }
+  'update' = @{
+    Usage = 'update [-Check] [-Force]'
+    Summary = 'Download the latest script from DNSBENCH_UPDATE_URL, back up the current copy and replace it.'
+    Examples = @('.\dns-bench.ps1 update', '.\dns-bench.ps1 update -Check')
+  }
+  'help' = @{
+    Usage = 'help [command]'
+    Summary = 'Show the grouped command list, or detailed usage and examples for one command.'
+    Examples = @('.\dns-bench.ps1 help', '.\dns-bench.ps1 help ports')
+  }
+  'version' = @{
+    Usage = 'version'
+    Summary = 'Print the script version.'
+    Examples = @('.\dns-bench.ps1 version', '.\dns-bench.ps1 version')
+  }
+}
+
+$script:AllCommands = @(
+  'run', 'best', 'set', 'reset', 'adblock', 'status', 'list', 'flush',
+  'test', 'info', 'speed',
+  'ports', 'http', 'tls', 'trace', 'asn', 'ptr', 'leak', 'propagation', 'mtu', 'ecs', 'ifaces', 'listen', 'wifi',
+  'update', 'demo', 'doctor', 'help', 'version'
+)
+
+function Get-TextDistance([string]$A, [string]$B) {
+  $a = $A.ToLower()
+  $b = $B.ToLower()
+  $rows = $a.Length + 1
+  $cols = $b.Length + 1
+  $grid = New-Object 'int[,]' $rows, $cols
+  for ($i = 0; $i -lt $rows; $i++) { $grid[$i, 0] = $i }
+  for ($j = 0; $j -lt $cols; $j++) { $grid[0, $j] = $j }
+  for ($i = 1; $i -lt $rows; $i++) {
+    for ($j = 1; $j -lt $cols; $j++) {
+      $cost = 1
+      if ($a[$i - 1] -eq $b[$j - 1]) { $cost = 0 }
+      $delete = $grid[($i - 1), $j] + 1
+      $insert = $grid[$i, ($j - 1)] + 1
+      $replace = $grid[($i - 1), ($j - 1)] + $cost
+      $grid[$i, $j] = [math]::Min($delete, [math]::Min($insert, $replace))
+    }
+  }
+  return $grid[($rows - 1), ($cols - 1)]
+}
+
+function Get-ClosestCommand([string]$Name) {
+  if (-not $Name) { return $null }
+  $wanted = $Name.ToLower()
+  foreach ($candidate in $script:AllCommands) {
+    if ($candidate -eq $wanted) { return $candidate }
+  }
+  foreach ($candidate in $script:AllCommands) {
+    if ($candidate.StartsWith($wanted) -or $wanted.StartsWith($candidate)) { return $candidate }
+  }
+  foreach ($candidate in $script:AllCommands) {
+    if ($candidate.Contains($wanted) -or $wanted.Contains($candidate)) { return $candidate }
+  }
+  $best = $null
+  $bestDistance = 99
+  foreach ($candidate in $script:AllCommands) {
+    $distance = Get-TextDistance $wanted $candidate
+    if ($distance -lt $bestDistance) { $bestDistance = $distance; $best = $candidate }
+  }
+  if ($bestDistance -le 2) { return $best }
+  return $null
+}
+
+function Show-CommandHelp([string]$Name) {
+  if (-not $Name) { Show-Usage; return 0 }
+  $key = $Name.ToLower().TrimStart('-')
+  if (-not $script:CommandHelp.ContainsKey($key)) {
+    Write-Bad "no such command: $Name"
+    $suggestion = Get-ClosestCommand $key
+    if ($suggestion) { Write-Host "Did you mean: ${suggestion}? Try: .\dns-bench.ps1 help $suggestion" }
+    else { Write-Host 'Run: .\dns-bench.ps1 help' }
+    return 1
+  }
+  $entry = $script:CommandHelp[$key]
+  Write-Host ''
+  Write-Host ("dns-bench {0}" -f $entry.Usage) -ForegroundColor White
+  Write-Host ''
+  Write-Host ("  {0}" -f $entry.Summary)
+  Write-Host ''
+  Write-Host 'Examples' -ForegroundColor Cyan
+  foreach ($example in $entry.Examples) { Write-Host ("  {0}" -f $example) }
+  Write-Host ''
+  Write-Host ("More: .\dns-bench.ps1 help    |    version {0}" -f $script:Version) -ForegroundColor DarkGray
+  return 0
 }
 
 # =====================================================================
@@ -178,6 +483,7 @@ $script:Resolvers = @(
   New-Resolver 'Google Public DNS' 'U' 'GL' @('8.8.8.8', '8.8.4.4') @('2001:4860:4860::8888', '2001:4860:4860::8844')
   New-Resolver 'Quad9 (Filtered)' 'F' 'GL' @('9.9.9.9', '149.112.112.112') @('2620:fe::fe', '2620:fe::9')
   New-Resolver 'Quad9 (Unfiltered)' 'U' 'GL' @('9.9.9.10', '149.112.112.10') @('2620:fe::10', '2620:fe::fe:10')
+  New-Resolver 'Quad9 (ECS)' 'F' 'GL' @('9.9.9.11', '149.112.112.11') @('2620:fe::11', '2620:fe::fe:11')
   New-Resolver 'OpenDNS Home' 'F' 'GL' @('208.67.222.222', '208.67.220.220') @('2620:119:35::35', '2620:119:53::53')
   New-Resolver 'OpenDNS Family' 'F' 'GL' @('208.67.222.123', '208.67.220.123') @('2620:119:35::123', '2620:119:53::123')
   New-Resolver 'AdGuard Default (ads)' 'A' 'GL' @('94.140.14.14', '94.140.15.15') @('2a10:50c0::ad1:ff', '2a10:50c0::ad2:ff')
@@ -191,7 +497,7 @@ $script:Resolvers = @(
   New-Resolver 'Mullvad Adblock' 'A' 'EU' @('194.242.2.3') @('2a07:e340::3')
   New-Resolver 'CleanBrowsing Security' 'F' 'GL' @('185.228.168.9', '185.228.169.9') @('2a0d:2a00:1::2', '2a0d:2a00:2::2')
   New-Resolver 'CleanBrowsing Family' 'F' 'GL' @('185.228.168.168', '185.228.169.168') @('2a0d:2a00:1::', '2a0d:2a00:2::')
-  New-Resolver 'CleanBrowsing Adult' 'F' 'GL' @('185.228.168.10', '185.228.169.11') @('2a0d:2a00:1::1', '2a0d:2a00:2::1')
+  New-Resolver 'CleanBrowsing Adult Filter' 'F' 'GL' @('185.228.168.10', '185.228.169.11') @('2a0d:2a00:1::1', '2a0d:2a00:2::1')
   New-Resolver 'DNS.SB' 'U' 'GL' @('185.222.222.222', '45.11.45.11') @('2a09::', '2a11::')
   New-Resolver 'Comodo Secure DNS' 'F' 'NA' @('8.26.56.26', '8.20.247.20') @()
   New-Resolver 'Verisign Public DNS' 'U' 'GL' @('64.6.64.6', '64.6.65.6') @('2620:74:1b::1:1', '2620:74:1c::2:2')
@@ -211,13 +517,17 @@ $script:Resolvers = @(
   New-Resolver 'SafeDNS' 'F' 'EU' @('195.46.39.39', '195.46.39.40') @()
   New-Resolver 'Yandex Basic' 'U' 'EU' @('77.88.8.8', '77.88.8.1') @('2a02:6b8::feed:0ff', '2a02:6b8:0:1::feed:0ff')
   New-Resolver 'Yandex Safe' 'F' 'EU' @('77.88.8.88', '77.88.8.2') @('2a02:6b8::feed:bad', '2a02:6b8:0:1::feed:bad')
+  New-Resolver 'Yandex Family' 'F' 'EU' @('77.88.8.7', '77.88.8.3') @('2a02:6b8::feed:a11', '2a02:6b8:0:1::feed:a11')
   New-Resolver 'Quad101 (TWNIC)' 'U' 'AS' @('101.101.101.101', '101.102.103.104') @('2001:de4::101', '2001:de4::102')
   New-Resolver 'AliDNS' 'U' 'AS' @('223.5.5.5', '223.6.6.6') @('2400:3200::1', '2400:3200:baba::1')
   New-Resolver 'DNSPod (Tencent)' 'U' 'AS' @('119.29.29.29', '182.254.116.116') @()
   New-Resolver 'Baidu DNS' 'U' 'AS' @('180.76.76.76') @('2400:da00::6666')
   New-Resolver '114DNS' 'U' 'AS' @('114.114.114.114', '114.114.115.115') @()
+  New-Resolver 'CNNIC SDNS' 'U' 'AS' @('1.2.4.8', '210.2.4.8') @()
   New-Resolver 'KT (Korea Telecom)' 'U' 'AS' @('168.126.63.1', '168.126.63.2') @()
+  New-Resolver 'LG U+ (Korea)' 'U' 'AS' @('164.124.101.2', '203.248.252.2') @()
   New-Resolver 'SingTel (Singapore)' 'U' 'AS' @('165.21.83.88', '165.21.100.88') @()
+  New-Resolver 'dnsforge.de (ads)' 'A' 'EU' @('176.9.93.198') @()
 )
 
 # =====================================================================
@@ -259,7 +569,7 @@ function Resolve-Timed {
 }
 
 function Get-DnsStats {
-  param([string]$Server, [string]$Mode, [int]$Count)
+  param([string]$Server, [string]$Mode, [int]$Count, [int]$ResolverIndex = 0)
   if (-not $Server -or $Server -eq 'none') {
     return [pscustomobject]@{ Median = $null; Min = $null; Max = $null; Loss = 0 }
   }
@@ -267,10 +577,9 @@ function Get-DnsStats {
   $fails = 0
   $tries = $Count
   if ($Mode -eq 'cached') { $tries = $Count + 1 }
-  $tlds = @('com', 'net', 'org')
   for ($i = 1; $i -le $tries; $i++) {
     if ($Mode -eq 'cold') {
-      $query = 'x' + (Get-Random -Minimum 100000 -Maximum 999999) + $i + '.' + $tlds[(Get-Random -Maximum 3)]
+      $query = New-ColdName -ResolverIndex $ResolverIndex -SampleIndex $i
     } else {
       $query = $Domain
     }
@@ -381,8 +690,8 @@ function Test-Dnssec {
 }
 
 function Test-NxHijack {
-  param([string]$Server)
-  $query = 'nx' + (Get-Random -Minimum 100000000 -Maximum 999999999) + '.com'
+  param([string]$Server, [int]$Index = 0)
+  $query = New-NxProbeName -ResolverIndex $Index
   $result = Resolve-Timed -Server $Server -Name $query -NoRetry
   if ($result.Status -eq 'NXDOMAIN') { return 'ok' }
   if ($result.Status -eq 'NOERROR' -and $result.Answers.Count -gt 0) { return 'HIJACK' }
@@ -518,18 +827,24 @@ function Invoke-Probe {
   param([int]$Index)
   $resolver = $script:Resolvers[$Index - 1]
   $primary = $resolver.V4[0]
+  # PS1 runs every probe in one process, so the RNG state is shared. Reseed
+  # from a fresh GUID at the start of each probe (before any random is drawn)
+  # so sequential resolvers cannot pick the same sample/name pattern.
+  $seed = [guid]::NewGuid().GetHashCode() -band 0x7FFFFFFF
+  if ($seed -eq 0) { $seed = 1 }
+  Get-Random -SetSeed $seed | Out-Null
   $cached = $null; $cold = $null; $jitter = $null; $loss = 100
   $v4ping = $null; $v6dns = 'N/A'; $v6ping = 'N/A'
   $dnssec = '-'; $nx = '-'; $tcp = '-'; $dot = '-'; $doh = '-'; $ads = '-'; $pop = '-'
 
-  $stats = Get-DnsStats -Server $primary -Mode 'cached' -Count $Samples
+  $stats = Get-DnsStats -Server $primary -Mode 'cached' -Count $Samples -ResolverIndex $Index
   if ($null -ne $stats.Median) {
     $cached = $stats.Median
     $jitter = $stats.Max - $stats.Min
     $loss = $stats.Loss
-    $coldStats = Get-DnsStats -Server $primary -Mode 'cold' -Count 3
+    $coldStats = Get-DnsStats -Server $primary -Mode 'cold' -Count 3 -ResolverIndex $Index
     if ($null -ne $coldStats.Median) { $cold = $coldStats.Median }
-    $nx = Test-NxHijack -Server $primary
+    $nx = Test-NxHijack -Server $primary -Index $Index
     if (-not $Quick) {
       $v4ping = (Get-PingStats -Target $primary).Avg
       if ($script:HasV6 -and $resolver.V6.Count -gt 0) {
@@ -1517,12 +1832,12 @@ function Invoke-Demo {
     [pscustomobject]@{ Index = 1; Name = 'Cloudflare'; Region = 'GL'; Kind = 'U'; Cached = '14 ms'; Jitter = '1.2 ms'; Loss = 0; Cold = '31 ms'; Score = '22.0'; V4Ping = '12.4 ms'; V6Dns = '15 ms'; V6Ping = '12.8 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
     [pscustomobject]@{ Index = 4; Name = 'Google Public DNS'; Region = 'GL'; Kind = 'U'; Cached = '16 ms'; Jitter = '1.8 ms'; Loss = 0; Cold = '34 ms'; Score = '24.7'; V4Ping = '13.1 ms'; V6Dns = '17 ms'; V6Ping = '13.5 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams01' }
     [pscustomobject]@{ Index = 6; Name = 'Quad9 (Unfiltered)'; Region = 'GL'; Kind = 'U'; Cached = '18 ms'; Jitter = '2.1 ms'; Loss = 0; Cold = '38 ms'; Score = '27.3'; V4Ping = '14.6 ms'; V6Dns = '19 ms'; V6Ping = '14.9 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'fra' }
-    [pscustomobject]@{ Index = 11; Name = 'AdGuard Unfiltered'; Region = 'GL'; Kind = 'U'; Cached = '21 ms'; Jitter = '2.6 ms'; Loss = 0; Cold = '44 ms'; Score = '31.7'; V4Ping = '15.2 ms'; V6Dns = '22 ms'; V6Ping = '15.6 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
-    [pscustomobject]@{ Index = 12; Name = 'Control D Unfiltered'; Region = 'GL'; Kind = 'U'; Cached = '23 ms'; Jitter = '3.0 ms'; Loss = 0; Cold = '47 ms'; Score = '34.3'; V4Ping = '16.8 ms'; V6Dns = '24 ms'; V6Ping = '17.1 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
-    [pscustomobject]@{ Index = 15; Name = 'NextDNS (Anycast)'; Region = 'GL'; Kind = 'U'; Cached = '27 ms'; Jitter = '3.4 ms'; Loss = 0; Cold = '52 ms'; Score = '38.7'; V4Ping = '17.9 ms'; V6Dns = '28 ms'; V6Ping = '18.2 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
-    [pscustomobject]@{ Index = 23; Name = 'Verisign Public DNS'; Region = 'GL'; Kind = 'U'; Cached = '31 ms'; Jitter = '4.1 ms'; Loss = 0; Cold = '58 ms'; Score = '43.7'; V4Ping = '19.4 ms'; V6Dns = '31 ms'; V6Ping = '19.8 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
-    [pscustomobject]@{ Index = 51; Name = 'Router / Gateway'; Region = 'LAN'; Kind = 'C'; Cached = '2.4 ms'; Jitter = '0.6 ms'; Loss = 0; Cold = '39 ms'; Score = '68.8'; V4Ping = '1.9 ms'; V6Dns = '-'; V6Ping = '1.8 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
-    [pscustomobject]@{ Index = 52; Name = 'Current system DNS'; Region = 'LAN'; Kind = 'C'; Cached = '14 ms'; Jitter = '1.5 ms'; Loss = 0; Cold = '36 ms'; Score = '23.0'; V4Ping = '12.6 ms'; V6Dns = '15 ms'; V6Ping = '12.9 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
+    [pscustomobject]@{ Index = 12; Name = 'AdGuard Unfiltered'; Region = 'GL'; Kind = 'U'; Cached = '21 ms'; Jitter = '2.6 ms'; Loss = 0; Cold = '44 ms'; Score = '31.7'; V4Ping = '15.2 ms'; V6Dns = '22 ms'; V6Ping = '15.6 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
+    [pscustomobject]@{ Index = 13; Name = 'Control D Unfiltered'; Region = 'GL'; Kind = 'U'; Cached = '23 ms'; Jitter = '3.0 ms'; Loss = 0; Cold = '47 ms'; Score = '34.3'; V4Ping = '16.8 ms'; V6Dns = '24 ms'; V6Ping = '17.1 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
+    [pscustomobject]@{ Index = 16; Name = 'NextDNS (Anycast)'; Region = 'GL'; Kind = 'U'; Cached = '27 ms'; Jitter = '3.4 ms'; Loss = 0; Cold = '52 ms'; Score = '38.7'; V4Ping = '17.9 ms'; V6Dns = '28 ms'; V6Ping = '18.2 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'yes'; Doh = 'yes'; Ads = 'no'; Pop = 'ams' }
+    [pscustomobject]@{ Index = 24; Name = 'Verisign Public DNS'; Region = 'GL'; Kind = 'U'; Cached = '31 ms'; Jitter = '4.1 ms'; Loss = 0; Cold = '58 ms'; Score = '43.7'; V4Ping = '19.4 ms'; V6Dns = '31 ms'; V6Ping = '19.8 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
+    [pscustomobject]@{ Index = 52; Name = 'Router / Gateway'; Region = 'LAN'; Kind = 'C'; Cached = '2.4 ms'; Jitter = '0.6 ms'; Loss = 0; Cold = '39 ms'; Score = '68.8'; V4Ping = '1.9 ms'; V6Dns = '-'; V6Ping = '1.8 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
+    [pscustomobject]@{ Index = 53; Name = 'Current system DNS'; Region = 'LAN'; Kind = 'C'; Cached = '14 ms'; Jitter = '1.5 ms'; Loss = 0; Cold = '36 ms'; Score = '23.0'; V4Ping = '12.6 ms'; V6Dns = '15 ms'; V6Ping = '12.9 ms'; Dnssec = 'yes'; Nx = 'ok'; Tcp = 'yes'; Dot = 'no'; Doh = 'yes'; Ads = 'no'; Pop = '-' }
   )
 
   Write-Host ("dns-bench {0}  {1}  |  target: {2}  |  samples: {3}" -f $script:Version,
@@ -1552,7 +1867,7 @@ function Invoke-Demo {
   Write-Kv 'Captive portal' 'None'
   Write-Kv 'System resolver egress IP' '203.0.113.42'
 
-  Write-Section ("DNS benchmark: {0} resolvers" -f 52)
+  Write-Section ("DNS benchmark: {0} resolvers" -f 53)
   Write-Note ('Cached = median of {0} queries for {1} | Cold = median of 3 random uncached names | Score = (cached + 2*cold)/3 + 3*loss%' -f $Samples, $Domain)
   $script:Results = @($demoRows)
   Show-Table
@@ -1617,9 +1932,1266 @@ function Invoke-Demo {
 }
 
 # =====================================================================
+# external tool helpers (3.3 network commands)
+# =====================================================================
+function Get-NullDevice {
+  if ($script:OnWindows) { return 'NUL' }
+  return '/dev/null'
+}
+
+function Get-BinPath {
+  param([string[]]$Names)
+  foreach ($name in $Names) {
+    $found = Get-Command $name -ErrorAction SilentlyContinue
+    if ($found -and $found.CommandType -eq 'Application') {
+      if ($found.Source) { return $found.Source }
+      if ($found.Path) { return $found.Path }
+    }
+  }
+  return $null
+}
+
+# Bounded, non-interactive external call. Every argument is quoted; the
+# caller owns the per-tool timeout (-m, +time=, -w) as well as WallClock here.
+function Invoke-External {
+  param(
+    [string]$File,
+    [string[]]$Arguments = @(),
+    [int]$TimeoutSec = 20,
+    [string]$InputText
+  )
+  $result = [pscustomobject]@{ Ok = $false; TimedOut = $false; ExitCode = -1; Output = ''; Error = '' }
+  if (-not $File) { $result.Error = 'binary not found'; return $result }
+  $process = $null
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $File
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $quoted = @()
+    foreach ($argument in $Arguments) {
+      $quoted += ('"' + ([string]$argument).Replace('"', '\"') + '"')
+    }
+    $psi.Arguments = ($quoted -join ' ')
+    if ($PSBoundParameters.ContainsKey('InputText')) { $psi.RedirectStandardInput = $true }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    if ($psi.RedirectStandardInput) {
+      $process.StandardInput.Write([string]$InputText)
+      $process.StandardInput.Close()
+    }
+    $outTask = $process.StandardOutput.ReadToEndAsync()
+    $errTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutSec * 1000)) {
+      try {
+        $process.Kill()
+        [void]$process.WaitForExit(1000)
+      } catch { }
+      $result.TimedOut = $true
+      $result.Error = "timed out after ${TimeoutSec}s"
+      return $result
+    }
+    $result.Output = $outTask.Result
+    $result.Error = $errTask.Result
+    $result.ExitCode = $process.ExitCode
+    $result.Ok = ($process.ExitCode -eq 0)
+    return $result
+  } catch {
+    $result.Error = $_.Exception.Message
+    return $result
+  } finally {
+    if ($process) { $process.Dispose() }
+  }
+}
+
+function Resolve-AllAddresses {
+  param([string]$Name)
+  if (-not $Name) { return @() }
+  if ($Name -match '^(\d{1,3}\.){3}\d{1,3}$' -or $Name -match ':') { return @($Name) }
+  $found = @()
+  if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+    try {
+      $records = Resolve-DnsName -Name $Name -Type A -DnsOnly -QuickTimeout -ErrorAction Stop
+      foreach ($record in $records) { if ($record.IPAddress) { $found += $record.IPAddress } }
+    } catch { }
+  }
+  if ($found.Count -eq 0) {
+    $dig = Get-BinPath @('dig')
+    if ($dig) {
+      $result = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', 'A', $Name) -TimeoutSec 6
+      foreach ($line in ($result.Output -split "`n")) {
+        if ($line -match '^(\d{1,3}\.){3}\d{1,3}$') { $found += $line.Trim() }
+      }
+    }
+  }
+  return @($found | Select-Object -Unique)
+}
+
+function Resolve-FirstAddress {
+  param([string]$Name)
+  $all = @(Resolve-AllAddresses $Name)
+  if ($all.Count -gt 0) { return $all[0] }
+  return $null
+}
+
+function Get-TxtRecords {
+  param([string]$Name, [string]$Server)
+  $values = @()
+  if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+    try {
+      $query = @{ Name = $Name; Type = 'TXT'; DnsOnly = $true; QuickTimeout = $true; ErrorAction = 'Stop' }
+      if ($Server) { $query['Server'] = $Server }
+      $records = Resolve-DnsName @query
+      foreach ($record in $records) {
+        if ($record.Strings) { $values += ($record.Strings -join '') }
+      }
+      if ($values.Count -gt 0) { return $values }
+    } catch { }
+  }
+  $dig = Get-BinPath @('dig')
+  if ($dig) {
+    $arguments = @('+short', '+time=2', '+tries=1', 'TXT', $Name)
+    if ($Server) { $arguments += ('@' + $Server) }
+    $result = Invoke-External -File $dig -Arguments $arguments -TimeoutSec 6
+    if ($result.Ok) {
+      foreach ($line in ($result.Output -split "`n")) {
+        $value = $line.Trim().Trim('"')
+        if ($value) { $values += $value }
+      }
+    }
+  }
+  return $values
+}
+
+function Get-PublicIp {
+  $curl = Get-CurlExe
+  if ($curl) {
+    $result = Invoke-External -File $curl -Arguments @('-4', '-sS', '--max-time', '5', '--url', 'https://1.1.1.1/cdn-cgi/trace') -TimeoutSec 8
+    if ($result.Ok) {
+      foreach ($line in ($result.Output -split "`n")) {
+        if ($line -match '^ip=(\S+)') { return $matches[1] }
+      }
+    }
+  }
+  if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+    try {
+      $records = Resolve-DnsName -Name 'myip.opendns.com' -Type A -Server '208.67.222.222' -DnsOnly -QuickTimeout -ErrorAction Stop
+      $address = ($records | Where-Object { $_.IPAddress } | Select-Object -First 1).IPAddress
+      if ($address) { return $address }
+    } catch { }
+  }
+  $dig = Get-BinPath @('dig')
+  if ($dig) {
+    $result = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', 'myip.opendns.com', 'A', '@resolver1.opendns.com') -TimeoutSec 6
+    foreach ($line in ($result.Output -split "`n")) {
+      if ($line -match '^(\d{1,3}\.){3}\d{1,3}$') { return $line.Trim() }
+    }
+  }
+  return $null
+}
+
+function Get-ReverseName {
+  param([string]$Address)
+  if ($Address -match '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+    return ('{0}.{1}.{2}.{3}.in-addr.arpa' -f $matches[4], $matches[3], $matches[2], $matches[1])
+  }
+  $parsed = $null
+  try { $parsed = [System.Net.IPAddress]::Parse($Address) } catch { return $null }
+  if (-not $parsed -or $parsed.AddressFamily -ne 'InterNetworkV6') { return $null }
+  $bytes = $parsed.GetAddressBytes()
+  $builder = New-Object System.Text.StringBuilder
+  for ($i = $bytes.Length - 1; $i -ge 0; $i--) {
+    [void]$builder.Append(('{0:x2}' -f $bytes[$i]))
+    [void]$builder.Append('.')
+  }
+  [void]$builder.Append('ip6.arpa')
+  return $builder.ToString()
+}
+
+function Get-RecordValues {
+  param([string]$Server, [string]$Name, [string]$Type = 'A')
+  $values = @()
+  $status = 'ERROR'
+  if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+    try {
+      $query = @{ Name = $Name; Type = $Type; Server = $Server; DnsOnly = $true; QuickTimeout = $true; ErrorAction = 'Stop' }
+      $records = Resolve-DnsName @query
+      $status = 'NOERROR'
+      foreach ($record in $records) {
+        switch ($Type.ToUpper()) {
+          'A' { if ($record.IPAddress) { $values += $record.IPAddress } }
+          'AAAA' { if ($record.IPAddress) { $values += $record.IPAddress } }
+          'CNAME' { if ($record.NameHost) { $values += $record.NameHost } }
+          'NS' { if ($record.NameHost) { $values += $record.NameHost } }
+          'MX' { if ($record.NameExchange) { $values += ('{0} {1}' -f $record.Preference, $record.NameExchange) } }
+          'TXT' { if ($record.Strings) { $values += ($record.Strings -join '') } }
+          'CAA' { if ($record.Tag) { $values += ('{0} {1} {2}' -f $record.Flags, $record.Tag, $record.Value) } }
+          'SOA' { if ($record.PrimaryServer) { $values += ('{0} serial {1}' -f $record.PrimaryServer, $record.SerialNumber) } }
+          default { if ($record.IPAddress) { $values += $record.IPAddress } }
+        }
+      }
+    } catch {
+      $message = "$($_.Exception.Message) $($_.FullyQualifiedErrorId)"
+      if ($message -match 'does not exist|NXDOMAIN|NAME_ERROR') { $status = 'NXDOMAIN' }
+      elseif ($message -match 'server failure|SERVFAIL') { $status = 'SERVFAIL' }
+      elseif ($message -match 'refused|REFUSED') { $status = 'REFUSED' }
+      elseif ($message -match 'timed out|timeout|no response|unreachable') { $status = 'TIMEOUT' }
+      else { $status = 'ERROR' }
+    }
+  } else {
+    $dig = Get-BinPath @('dig')
+    if (-not $dig) { return [pscustomobject]@{ Status = 'NO-TOOL'; Values = @() } }
+    $result = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', ('@' + $Server), $Name, $Type) -TimeoutSec 6
+    if ($result.TimedOut) { $status = 'TIMEOUT' }
+    elseif ($result.ExitCode -ne 0) { $status = 'ERROR' }
+    else {
+      $status = 'NOERROR'
+      foreach ($line in ($result.Output -split "`n")) {
+        $value = $line.Trim()
+        if ($value) { $values += $value }
+      }
+    }
+  }
+  return [pscustomobject]@{
+    Status = $status
+    Values = @($values | Where-Object { $_ } | Select-Object -Unique)
+  }
+}
+
+function Get-ConfiguredDns {
+  $servers = @()
+  if (Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue) {
+    try { $servers = @(Get-SystemDns) } catch { }
+  }
+  if ($servers.Count -eq 0 -and $script:OSKind -eq 'macos') {
+    $scutil = Get-BinPath @('scutil')
+    if ($scutil) {
+      $result = Invoke-External -File $scutil -Arguments @('--dns') -TimeoutSec 5
+      foreach ($line in ($result.Output -split "`n")) {
+        if ($line -match 'nameserver\[[0-9]+\]\s*:\s*(\S+)') { $servers += $matches[1] }
+      }
+    }
+  }
+  if ($servers.Count -eq 0 -and (Test-Path '/etc/resolv.conf')) {
+    foreach ($line in (Get-Content -Path '/etc/resolv.conf' -ErrorAction SilentlyContinue)) {
+      if ($line -match '^\s*nameserver\s+(\S+)') { $servers += $matches[1] }
+    }
+  }
+  $unique = @()
+  foreach ($server in $servers) {
+    if ($server -and $unique -notcontains $server) { $unique += $server }
+  }
+  return $unique
+}
+
+function Test-SameAddress {
+  param([string]$A, [string]$B)
+  if ($A -eq $B) { return $true }
+  try {
+    $first = [System.Net.IPAddress]::Parse($A)
+    $second = [System.Net.IPAddress]::Parse($B)
+    return $first.Equals($second)
+  } catch {
+    return $false
+  }
+}
+
+function ConvertFrom-CertDate {
+  param([string]$Text)
+  if (-not $Text -or $Text -eq '-') { return $null }
+  $clean = ($Text -replace '\s+', ' ').Trim()
+  foreach ($format in @('MMM d HH:mm:ss yyyy GMT', 'MMM d HH:mm:ss yyyy')) {
+    try {
+      return [datetime]::ParseExact($clean, $format, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AdjustToUniversal)
+    } catch { }
+  }
+  try {
+    return [datetime]::Parse($clean, [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::AdjustToUniversal)
+  } catch {
+    return $null
+  }
+}
+
+function Test-DfPing {
+  param([string]$PingExe, [string]$Target, [int]$Payload, [int]$TimeoutSec = 3)
+  $arguments = @()
+  if ($script:OnWindows) {
+    $arguments = @('-4', '-n', '1', '-w', '1000', '-f', '-l', "$Payload", $Target)
+  } elseif ($script:OSKind -eq 'macos') {
+    $arguments = @('-D', '-c', '1', '-W', '1000', '-s', "$Payload", $Target)
+  } else {
+    $arguments = @('-M', 'do', '-c', '1', '-W', '1', '-s', "$Payload", $Target)
+  }
+  $result = Invoke-External -File $PingExe -Arguments $arguments -TimeoutSec $TimeoutSec
+  if ($result.TimedOut -or $result.ExitCode -ne 0) { return $false }
+  $text = "$($result.Output) $($result.Error)"
+  if ($text -match 'too long|too big|fragmentation needed|needs to be fragmented|Message too long') { return $false }
+  return $true
+}
+
+function ConvertFrom-TraceText {
+  param([string]$Text)
+  $rows = @()
+  foreach ($line in ($Text -split "`n")) {
+    $clean = $line.TrimEnd()
+    if ($clean -match 'pmtu|Trace complete|Tracing route|over a maximum') { continue }
+    if ($clean -match '^\s*(\d+)[\s:?]+\s*(.*)$') {
+      $hop = [int]$matches[1]
+      $rest = $matches[2]
+      $address = '*'
+      if ($rest -match '\b(\d{1,3}(?:\.\d{1,3}){3})\b') { $address = $matches[1] }
+      elseif ($rest -match '\b([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,})\b') { $address = $matches[1] }
+      $rtt = '-'
+      if ($rest -match '<?\s*([\d.]+)\s*ms') { $rtt = "$($matches[1]) ms" }
+      $rows += [pscustomobject]@{ Hop = $hop; Address = $address; Rtt = $rtt }
+    }
+  }
+  return $rows
+}
+
+function Get-PortState {
+  param([string]$Target, [int]$Port, [int]$TimeoutMs = 2000)
+  $client = New-Object System.Net.Sockets.TcpClient
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  try {
+    $task = $client.ConnectAsync($Target, $Port)
+    if (-not $task.Wait($TimeoutMs)) { return [pscustomobject]@{ State = 'filtered'; Ms = $null } }
+    $watch.Stop()
+    if ($client.Connected) { return [pscustomobject]@{ State = 'open'; Ms = [int]$watch.ElapsedMilliseconds } }
+    return [pscustomobject]@{ State = 'closed'; Ms = $null }
+  } catch {
+    $inner = $_.Exception
+    if ($inner.InnerException) { $inner = $inner.InnerException }
+    $socket = $inner -as [System.Net.Sockets.SocketException]
+    if ($socket -and $socket.SocketErrorCode -eq 'ConnectionRefused') {
+      return [pscustomobject]@{ State = 'closed'; Ms = $null }
+    }
+    if ($socket -and ($socket.SocketErrorCode -eq 'TimedOut' -or
+        $socket.SocketErrorCode -eq 'HostUnreachable' -or
+        $socket.SocketErrorCode -eq 'NetworkUnreachable')) {
+      return [pscustomobject]@{ State = 'filtered'; Ms = $null }
+    }
+    return [pscustomobject]@{ State = 'closed'; Ms = $null }
+  } finally {
+    $client.Close()
+  }
+}
+
+# =====================================================================
+# network commands (3.3)
+# =====================================================================
+function Invoke-Ports {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 ports HOST [PORTS]'
+    return
+  }
+  $target = $Argument.Trim()
+  $portText = ''
+  if ($Rest -and $Rest.Count -gt 0) { $portText = ($Rest -join ' ') }
+  if (-not $portText) { $portText = '22 53 80 443 853 3306 5432 6379 8080' }
+  $ports = @()
+  foreach ($token in ($portText -split '[,\s]+')) {
+    if ($token -match '^\d+$') {
+      $value = [int]$token
+      if ($value -ge 1 -and $value -le 65535) { $ports += $value }
+    }
+  }
+  $ports = @($ports | Select-Object -Unique)
+  if ($ports.Count -eq 0) { Write-Bad 'no valid ports given'; return }
+
+  $serviceNames = @{ 22 = 'ssh'; 53 = 'dns'; 80 = 'http'; 443 = 'https'; 853 = 'dot'; 3306 = 'mysql'
+    5432 = 'postgres'; 6379 = 'redis'; 8080 = 'http-alt' }
+  Write-Section ("TCP ports: $target")
+  Write-Host ('  {0,-5} {1,-10} {2,-9} {3}' -f 'Port', 'State', 'Connect', 'Service') -ForegroundColor White
+  $openCount = 0
+  foreach ($port in $ports) {
+    $probe = Get-PortState -Target $target -Port $port -TimeoutMs 2000
+    $msText = '-'
+    if ($null -ne $probe.Ms) { $msText = ("{0} ms" -f $probe.Ms) }
+    $color = 'Gray'
+    if ($probe.State -eq 'open') { $color = 'Green'; $openCount++ }
+    elseif ($probe.State -eq 'filtered') { $color = 'Yellow' }
+    $service = ''
+    if ($serviceNames.ContainsKey($port)) { $service = $serviceNames[$port] }
+    Write-Host ('  {0,-5} {1,-10} {2,-9} {3}' -f $port, $probe.State, $msText, $service) -ForegroundColor $color
+  }
+  Write-Note ("{0} of {1} open. open = handshake completed, closed = refused, filtered = no reply (drop/firewall)." -f $openCount, $ports.Count)
+}
+
+function Invoke-Http {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 http URL'
+    return
+  }
+  $url = $Argument.Trim()
+  if ($url -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $url = 'https://' + $url }
+  Write-Section "HTTP: $url"
+  $curl = Get-CurlExe
+  if (-not $curl) {
+    Write-Bad 'http needs curl (curl.exe ships with Windows 10 1803+).'
+    return
+  }
+  $template = '%{http_code}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{num_redirects}|%{url_effective}'
+  $result = Invoke-External -File $curl -Arguments @('-sS', '-L', '--max-time', '20', '-o', (Get-NullDevice), '-w', $template, '--url', $url) -TimeoutSec 25
+  if ($result.TimedOut) { Write-Bad 'request timed out'; return }
+  $line = $null
+  foreach ($candidate in ($result.Output -split "`n")) {
+    if ($candidate -match '^\d{3}\|') { $line = $candidate.Trim() }
+  }
+  if (-not $line) {
+    Write-Bad ("curl returned no timing data{0}" -f $(if ($result.Error) { ": $($result.Error.Trim())" } else { '' }))
+    return
+  }
+  $fields = $line -split '\|'
+  if ($fields.Count -lt 9) { Write-Bad 'could not parse curl timing output'; return }
+
+  $dnsMs = [int][math]::Round([double]$fields[1] * 1000)
+  $connectRaw = [double]$fields[2]
+  $tlsRaw = [double]$fields[3]
+  $ttfbRaw = [double]$fields[4]
+  $connectMs = [int][math]::Round(($connectRaw - [double]$fields[1]) * 1000)
+  $tlsMs = [int][math]::Round(($tlsRaw - $connectRaw) * 1000)
+  $ttfbMs = [int][math]::Round(($ttfbRaw - $tlsRaw) * 1000)
+  $totalMs = [int][math]::Round([double]$fields[5] * 1000)
+  if ($connectMs -lt 0) { $connectMs = 0 }
+  if ($tlsMs -lt 0) { $tlsMs = 0 }
+  if ($ttfbMs -lt 0) { $ttfbMs = 0 }
+
+  Write-Kv 'HTTP code' $fields[0]
+  Write-Kv 'dns' ("{0} ms" -f $dnsMs)
+  Write-Kv 'connect' ("{0} ms" -f $connectMs)
+  Write-Kv 'tls' ("{0} ms" -f $tlsMs)
+  Write-Kv 'ttfb' ("{0} ms" -f $ttfbMs)
+  Write-Kv 'total' ("{0} ms" -f $totalMs)
+  Write-Kv 'size' ("{0} bytes" -f [int64]$fields[6])
+  Write-Kv 'redirects' $fields[7]
+  Write-Kv 'final URL' $fields[8]
+}
+
+function Invoke-Tls {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 tls HOST[:PORT]'
+    return
+  }
+  $target = $Argument.Trim()
+  $hostName = $target
+  $port = 443
+  if ($target -match '^\[(.+)\]:(\d+)$') {
+    $hostName = $matches[1]
+    $port = [int]$matches[2]
+  } elseif ($target -match '^([^:]+):(\d+)$') {
+    $hostName = $matches[1]
+    $port = [int]$matches[2]
+  }
+  Write-Section ("TLS: {0}:{1}" -f $hostName, $port)
+
+  $subject = $null
+  $issuer = '-'
+  $notBefore = '-'
+  $notAfter = '-'
+  $sanCount = 'n/a'
+  $protocol = '-'
+  $method = $null
+
+  $openssl = Get-BinPath @('openssl')
+  if ($openssl) {
+    $handshake = Invoke-External -File $openssl `
+      -Arguments @('s_client', '-connect', ("{0}:{1}" -f $hostName, $port), '-servername', $hostName, '-showcerts') `
+      -TimeoutSec 15 -InputText ''
+    $pem = @()
+    $inPem = $false
+    foreach ($line in ($handshake.Output -split "`n")) {
+      if ($line -match 'BEGIN CERTIFICATE') { $inPem = $true }
+      if ($inPem) { $pem += $line.TrimEnd() }
+      if ($line -match 'END CERTIFICATE') { break }
+    }
+    if ($pem.Count -ge 2) {
+      $method = 'openssl s_client'
+      $certFile = Join-Path $script:TmpDir 'tls-cert.pem'
+      try { Set-Content -Path $certFile -Value $pem -Encoding ASCII } catch { }
+      $details = Invoke-External -File $openssl `
+        -Arguments @('x509', '-in', $certFile, '-noout', '-subject', '-issuer', '-startdate', '-enddate') -TimeoutSec 10
+      if ($details.Output -match '(?m)^issuer=\s*(.+)$') { $issuer = $matches[1].Trim() }
+      if ($details.Output -match '(?m)^notBefore=\s*(.+)$') { $notBefore = $matches[1].Trim() }
+      if ($details.Output -match '(?m)^notAfter=\s*(.+)$') { $notAfter = $matches[1].Trim() }
+      if ($details.Output -match 'subject=.*?CN\s*=\s*([^,\r\n]+)') { $subject = $matches[1].Trim() }
+      elseif ($details.Output -match '(?m)^subject=\s*(.+)$') { $subject = $matches[1].Trim() }
+
+      $sanResult = Invoke-External -File $openssl -Arguments @('x509', '-in', $certFile, '-noout', '-ext', 'subjectAltName') -TimeoutSec 10
+      $sanText = $sanResult.Output
+      if ($sanResult.ExitCode -ne 0 -or -not $sanText) {
+        $sanResult = Invoke-External -File $openssl -Arguments @('x509', '-in', $certFile, '-noout', '-text') -TimeoutSec 10
+        $sanText = $sanResult.Output
+      }
+      $dnsCount = ([regex]::Matches($sanText, 'DNS:')).Count
+      if ($dnsCount -gt 0) { $sanCount = [string]$dnsCount }
+
+      if ($handshake.Output -match 'Protocol\s*:\s*(\S+)') { $protocol = $matches[1] }
+      elseif ($handshake.Output -match 'New,\s*(TLSv[0-9.]+)') { $protocol = $matches[1] }
+    }
+    Remove-Item -Path (Join-Path $script:TmpDir 'tls-cert.pem') -Force -ErrorAction SilentlyContinue
+  }
+
+  if (-not $subject) {
+    $curl = Get-CurlExe
+    if ($curl) {
+      $verbose = Invoke-External -File $curl `
+        -Arguments @('-sS', '-o', (Get-NullDevice), '-v', '--max-time', '15', '--url', ("https://{0}:{1}" -f $hostName, $port)) -TimeoutSec 20
+      $text = "$($verbose.Error) `n $($verbose.Output)"
+      $foundAny = $false
+      if ($text -match '(?m)^\*\s+subject:\s*(.+)$') {
+        $subjectText = $matches[1].Trim()
+        if ($subjectText -match 'CN\s*=\s*([^,]+)') { $subject = $matches[1].Trim() } else { $subject = $subjectText }
+        $foundAny = $true
+      }
+      if ($text -match '(?m)^\*\s+issuer:\s*(.+)$') { $issuer = $matches[1].Trim() }
+      if ($text -match '(?m)^\*\s+start date:\s*(.+)$') { $notBefore = $matches[1].Trim() }
+      if ($text -match '(?m)^\*\s+expire date:\s*(.+)$') { $notAfter = $matches[1].Trim() }
+      if ($text -match 'SSL connection using\s+(\S+)') { $protocol = $matches[1] }
+      if ($foundAny) { $method = 'curl -v' }
+    }
+  }
+
+  if (-not $subject) {
+    Write-Bad 'no certificate retrieved: openssl s_client and curl both failed (host unreachable, or neither tool present).'
+    return
+  }
+
+  $daysLeft = $null
+  if ($notAfter -ne '-') {
+    $end = ConvertFrom-CertDate $notAfter
+    if ($end) {
+      $daysLeft = [int][math]::Floor(($end.ToUniversalTime() - [DateTime]::UtcNow).TotalDays)
+    }
+  }
+
+  Write-Kv 'subject CN' $subject
+  Write-Kv 'issuer' $issuer
+  Write-Kv 'notBefore' $notBefore
+  Write-Kv 'notAfter' $notAfter
+  if ($null -ne $daysLeft) {
+    $daysText = "$daysLeft"
+    Write-Kv 'days left' $daysText
+  } else {
+    Write-Kv 'days left' 'unknown'
+  }
+  Write-Kv 'SAN count' $sanCount
+  Write-Kv 'protocol' $protocol
+  if (-not $Q) { Write-Note ("read with {0}" -f $method) }
+  if ($null -ne $daysLeft -and $daysLeft -lt 21) {
+    Write-Warn2 ("certificate expires in {0} days" -f $daysLeft)
+  }
+}
+
+function Invoke-Trace {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 trace HOST'
+    return
+  }
+  $target = $Argument.Trim()
+  Write-Section "Trace: $target"
+  $traceroute = Get-BinPath @('traceroute')
+  $tracepath = Get-BinPath @('tracepath')
+  $tracert = Get-BinPath @('tracert')
+  $result = $null
+  $used = $null
+  if ($traceroute) {
+    $used = 'traceroute'
+    $result = Invoke-External -File $traceroute -Arguments @('-n', '-q', '1', '-w', '1', '-m', '16', $target) -TimeoutSec 40
+  } elseif ($tracepath) {
+    $used = 'tracepath'
+    $result = Invoke-External -File $tracepath -Arguments @('-n', '-m', '16', $target) -TimeoutSec 40
+  } elseif ($tracert) {
+    $used = 'tracert'
+    $result = Invoke-External -File $tracert -Arguments @('-d', '-h', '16', '-w', '1000', $target) -TimeoutSec 60
+  } else {
+    Write-Bad 'trace needs traceroute, tracepath or tracert; none found.'
+    return
+  }
+  if ($result.TimedOut) { Write-Warn2 'trace stopped at the timeout'; }
+  $rows = @(ConvertFrom-TraceText -Text $result.Output)
+  if ($rows.Count -eq 0) {
+    Write-Warn2 ("no hops parsed from {0}" -f $used)
+    if ($result.Error) { Write-Note $result.Error.Trim() }
+    return
+  }
+  Write-Host ('  {0,-5} {1,-40} {2,9}' -f 'Hop', 'Address', 'RTT') -ForegroundColor White
+  foreach ($row in $rows) {
+    Write-Host ('  {0,-5} {1,-40} {2,9}' -f $row.Hop, $row.Address, $row.Rtt)
+  }
+  if (-not $Q) { Write-Note ("path: {0}, 16 hops max, one probe per hop" -f $used) }
+}
+
+function Invoke-Asn {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 asn HOST|IP'
+    return
+  }
+  $target = $Argument.Trim()
+  $address = Resolve-FirstAddress $target
+  if (-not $address) {
+    Write-Bad ("could not resolve {0}" -f $target)
+    return
+  }
+  Write-Section "ASN: $target ($target)"
+
+  $reverse = Get-ReverseName $address
+  if (-not $reverse) { Write-Bad ("not a usable IPv4/IPv6 address: {0}" -f $address); return }
+  $suffix = 'origin.asn.cymru.com'
+  if ($address -match ':') { $suffix = 'origin6.asn.cymru.com' }
+  $queryName = ($reverse -replace '\.(in-addr|ip6)\.arpa$', ('.' + $suffix))
+
+  $origin = (Get-TxtRecords -Name $queryName | Select-Object -First 1)
+  if (-not $origin) {
+    Write-Bad 'no ASN data (private/reserved address, or Team Cymru unreachable).'
+    return
+  }
+  $fields = @($origin -split '\|' | ForEach-Object { $_.Trim() })
+  while ($fields.Count -lt 5) { $fields += '' }
+  $asnNumbers = @($fields[0] -split '\s+' | Where-Object { $_ })
+  $asnText = @()
+  foreach ($number in $asnNumbers) { $asnText += ('AS' + $number) }
+  Write-Kv 'ASN' ($asnText -join ', ')
+  Write-Kv 'BGP prefix' $fields[1]
+  Write-Kv 'Country' $fields[2]
+  Write-Kv 'Registry' $fields[3]
+  if ($fields.Count -gt 4 -and $fields[4]) { Write-Kv 'Allocated' $fields[4] }
+
+  $org = '-'
+  if ($asnNumbers.Count -gt 0) {
+    $detail = (Get-TxtRecords -Name ('AS{0}.asn.cymru.com' -f $asnNumbers[0]) | Select-Object -First 1)
+    if ($detail) {
+      $detailFields = @($detail -split '\|' | ForEach-Object { $_.Trim() })
+      if ($detailFields.Count -ge 5 -and $detailFields[4]) { $org = $detailFields[4] }
+    }
+  }
+  Write-Kv 'Org' $org
+}
+
+function Invoke-Ptr {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 ptr IP'
+    return
+  }
+  $address = $Argument.Trim()
+  $reverse = Get-ReverseName $address
+  if (-not $reverse) {
+    Write-Bad ("not a valid IPv4/IPv6 address: {0}" -f $address)
+    return
+  }
+  Write-Section "PTR: $address"
+
+  $names = @()
+  if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+    try {
+      $records = Resolve-DnsName -Name $reverse -Type PTR -DnsOnly -QuickTimeout -ErrorAction Stop
+      foreach ($record in $records) { if ($record.NameHost) { $names += $record.NameHost.TrimEnd('.') } }
+    } catch { }
+  }
+  if ($names.Count -eq 0) {
+    $dig = Get-BinPath @('dig')
+    if ($dig) {
+      $result = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', 'PTR', $reverse) -TimeoutSec 6
+      foreach ($line in ($result.Output -split "`n")) {
+        $value = $line.Trim().TrimEnd('.')
+        if ($value) { $names += $value }
+      }
+    }
+  }
+  if ($names.Count -eq 0) {
+    Write-Note 'no PTR record'
+    Write-Kv 'Forward-confirmed reverse DNS' 'no'
+    return
+  }
+  foreach ($name in ($names | Select-Object -Unique)) {
+    Write-Kv 'PTR' $name
+  }
+  $confirmed = $false
+  foreach ($name in $names) {
+    foreach ($forward in @(Resolve-AllAddresses $name)) {
+      if ($forward -and (Test-SameAddress $forward $address)) { $confirmed = $true }
+    }
+  }
+  if ($confirmed) { Write-Kv 'Forward-confirmed reverse DNS' 'yes' }
+  else { Write-Kv 'Forward-confirmed reverse DNS' 'no' }
+}
+
+function Get-ResolverEgress {
+  param([string]$Server)
+  foreach ($name in @('o-o.myaddr.l.google.com')) {
+    foreach ($value in (Get-TxtRecords -Name $name -Server $Server)) {
+      $clean = $value.Trim().Trim('"')
+      if ($clean -match '^(\d{1,3}\.){3}\d{1,3}$') { return $clean }
+      if ($clean -match '^[0-9a-fA-F:]+$' -and $clean.Contains(':')) { return $clean }
+    }
+  }
+  return $null
+}
+
+function Invoke-Leak {
+  Write-Section 'DNS leak check'
+  $public = $null
+  if ($Privacy) {
+    Write-Note 'Privacy mode: public IP lookup skipped.'
+    Write-Kv 'Public IP' 'skipped (-Privacy)'
+  } else {
+    $public = Get-PublicIp
+    if ($public) { Write-Kv 'Public IP' $public } else { Write-Kv 'Public IP' 'unknown' }
+  }
+
+  $systemEgress = Get-ResolverEgress -Server $null
+  if ($systemEgress) { Write-Kv 'System resolver egress' $systemEgress }
+  else { Write-Kv 'System resolver egress' 'no answer' }
+
+  $configured = @(Get-ConfiguredDns)
+  $egresses = @()
+  if ($systemEgress) { $egresses += $systemEgress }
+  if ($configured.Count -eq 0) { Write-Note 'no configured resolver addresses found' }
+  foreach ($server in $configured) {
+    $egress = Get-ResolverEgress -Server $server
+    if ($egress) {
+      Write-Kv ("Egress via {0}" -f $server) $egress
+      $egresses += $egress
+    } else {
+      Write-Kv ("Egress via {0}" -f $server) 'no answer'
+    }
+  }
+
+  $distinct = @($egresses | Select-Object -Unique)
+  $mismatch = $false
+  if ($public -and $systemEgress -and $systemEgress -ne $public) { $mismatch = $true }
+  if ($public) {
+    foreach ($egress in $distinct) { if ($egress -ne $public) { $mismatch = $true } }
+  }
+  if ($distinct.Count -gt 1) { $mismatch = $true }
+
+  $verdict = 'no mismatch found'
+  if ($mismatch) {
+    if ($public) {
+      $verdict = 'mismatch: DNS leaves through a different network than your public IP'
+    } else {
+      $verdict = 'mismatch: resolvers leave through different networks'
+    }
+  }
+  Write-Kv 'Verdict' $verdict
+  if ($mismatch) {
+    Write-Note 'A mismatch is normal behind a router or ISP resolver and expected with a VPN split tunnel; it can also mean a DNS leak.'
+  }
+}
+
+function Invoke-Propagation {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 propagation DOMAIN [TYPE]'
+    return
+  }
+  $target = $Argument.Trim()
+  $type = 'A'
+  if ($Rest -and $Rest.Count -gt 0) { $type = $Rest[0].ToUpper() }
+  $allowed = @('A', 'AAAA', 'CNAME', 'NS', 'MX', 'TXT', 'SOA', 'CAA')
+  if ($allowed -notcontains $type) {
+    Write-Bad ("unsupported record type: {0} (use {1})" -f $type, ($allowed -join ', '))
+    return
+  }
+  $resolvers = @(
+    @('Cloudflare', '1.1.1.1'),
+    @('Google', '8.8.8.8'),
+    @('Quad9', '9.9.9.9'),
+    @('OpenDNS', '208.67.222.222'),
+    @('AdGuard', '94.140.14.14'),
+    @('Control D', '76.76.2.0'),
+    @('Verisign', '64.6.64.6'),
+    @('DNS.WATCH', '84.200.69.80')
+  )
+  Write-Section ("Propagation: {0} ({1})" -f $target, $type)
+  Write-Host ('  {0,-14} {1,-10} {2}' -f 'Resolver', 'Status', 'Answer') -ForegroundColor White
+  $groups = @{}
+  foreach ($entry in $resolvers) {
+    $record = Get-RecordValues -Server $entry[1] -Name $target -Type $type
+    $answerText = '-'
+    if ($record.Values.Count -gt 0) {
+      $answerText = ($record.Values -join ', ')
+      if ($answerText.Length -gt 68) { $answerText = $answerText.Substring(0, 65) + '...' }
+    }
+    Write-Host ('  {0,-14} {1,-10} {2}' -f $entry[0], $record.Status, $answerText)
+    $key = ($record.Values | Sort-Object) -join ';'
+    if (-not $key) { $key = "<no answer>" }
+    if (-not $groups.ContainsKey($key)) { $groups[$key] = @() }
+    $groups[$key] += $entry[0]
+  }
+
+  $topKey = $null
+  $topCount = 0
+  foreach ($key in $groups.Keys) {
+    if ($groups[$key].Count -gt $topCount) { $topCount = $groups[$key].Count; $topKey = $key }
+  }
+  Write-Host ''
+  Write-Kv 'Agreement' ("{0}/{1} resolvers return the most common answer" -f $topCount, $resolvers.Count)
+  Write-Kv 'Distinct answers' ([string]$groups.Keys.Count)
+  foreach ($key in ($groups.Keys | Sort-Object { $groups[$_].Count } -Descending)) {
+    $names = $groups[$key] -join ', '
+    $shown = $key
+    if ($shown.Length -gt 60) { $shown = $shown.Substring(0, 57) + '...' }
+    Write-Host ('  {0,2}/{1}  {2}  [{3}]' -f $groups[$key].Count, $resolvers.Count, $shown, $names)
+  }
+  if ($groups.Keys.Count -gt 1) {
+    Write-Note 'Different answers can be normal for CDNs and geo-DNS; for a single-host record they mean propagation is incomplete.'
+  }
+}
+
+function Invoke-Mtu {
+  if (-not $Argument) {
+    Write-Bad 'usage: .\dns-bench.ps1 mtu HOST'
+    return
+  }
+  $target = $Argument.Trim()
+  Write-Section "Path MTU: $target"
+  $ping = Get-BinPath @('ping')
+  if (-not $ping) {
+    Write-Bad 'mtu needs ping; not found.'
+    return
+  }
+  if (-not (Test-DfPing -PingExe $ping -Target $target -Payload 56)) {
+    Write-Bad ("no reply from {0} (ICMP blocked or host down)" -f $target)
+    return
+  }
+  $low = 56
+  $high = 1472
+  $best = 56
+  while ($low -le $high) {
+    $mid = [int][math]::Floor(($low + $high) / 2)
+    if (Test-DfPing -PingExe $ping -Target $target -Payload $mid) {
+      $best = $mid
+      $low = $mid + 1
+    } else {
+      $high = $mid - 1
+    }
+  }
+  Write-Kv 'Path MTU' ("{0} bytes" -f ($best + 28))
+  Write-Kv 'Payload size' ("{0} bytes" -f $best)
+  if ($best -lt 1472) {
+    Write-Note 'Below Ethernet 1500: a tunnel, VPN or PPPoE is shrinking the path MTU.'
+  } else {
+    Write-Note 'Standard Ethernet MTU.'
+  }
+}
+
+function Invoke-Ecs {
+  $target = $Domain
+  if ($Argument) { $target = $Argument.Trim() }
+  Write-Section ("EDNS Client Subnet: {0}" -f $target)
+  $dig = Get-BinPath @('dig')
+  if (-not $dig) {
+    Write-Bad 'ecs needs dig (the only tool here that can send EDNS Client Subnet); not found.'
+    return
+  }
+  if ($Privacy) {
+    Write-Bad 'ecs needs your public IP to build the subnet; -Privacy blocks that lookup.'
+    return
+  }
+  $public = Get-PublicIp
+  if (-not $public) {
+    Write-Bad 'could not determine your public IP; cannot build an ECS subnet.'
+    return
+  }
+  if ($public -match ':') {
+    Write-Bad ("public address is IPv6 ({0}); this check builds an IPv4 /24 subnet" -f $public)
+    return
+  }
+  $subnet = ($public -split '\.')[0..2] -join '.'
+  $plain = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', '@8.8.8.8', $target, 'A', '+subnet=0') -TimeoutSec 8
+  $ecs = Invoke-External -File $dig -Arguments @('+short', '+time=2', '+tries=1', '@8.8.8.8', $target, 'A', ('+subnet={0}/24' -f $subnet)) -TimeoutSec 8
+
+  $plainValues = @(($plain.Output -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object)
+  $ecsValues = @(($ecs.Output -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object)
+  Write-Kv 'resolver' '8.8.8.8'
+  Write-Kv 'without ECS (+subnet=0)' $(if ($plainValues.Count) { $plainValues -join ', ' } else { '-' })
+  Write-Kv ('with ECS (+subnet={0}/24)' -f $subnet) $(if ($ecsValues.Count) { $ecsValues -join ', ' } else { '-' })
+  $changed = (($plainValues -join ',') -ne ($ecsValues -join ','))
+  Write-Kv 'ECS changes the answer' $(if ($changed) { 'yes' } else { 'no' })
+  Write-Note 'A "yes" means this resolver geo-steers on your subnet; cached results from other subnets cannot be compared with yours.'
+}
+
+function Invoke-Ifaces {
+  Write-Section 'Network interfaces'
+  if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
+    Write-Host ('  {0,-18} {1,-8} {2,-6} {3,-18} {4,-18} {5,-26} {6}' -f 'Interface', 'State', 'MTU', 'MAC', 'IPv4', 'IPv6', 'Media') -ForegroundColor White
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Sort-Object InterfaceIndex)
+    foreach ($adapter in $adapters) {
+      $mtu = $adapter.MtuSize
+      if (-not $mtu) {
+        $ipInterface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ipInterface) { $mtu = $ipInterface.NlMtu }
+      }
+      $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
+      $v4 = @($addresses | Where-Object { $_.AddressFamily -eq 'IPv4' -and $_.IPAddress -notmatch '^169\.254\.' } | ForEach-Object { $_.IPAddress })
+      $v6 = @($addresses | Where-Object { $_.AddressFamily -eq 'IPv6' -and $_.IPAddress -notmatch '^fe80' } | ForEach-Object { $_.IPAddress })
+      $media = $adapter.MediaType
+      if ($adapter.PhysicalMediaType) { $media = $adapter.PhysicalMediaType }
+      Write-Host ('  {0,-18} {1,-8} {2,-6} {3,-18} {4,-18} {5,-26} {6}' -f $adapter.Name, $adapter.Status,
+        $(if ($mtu) { $mtu } else { '-' }), $adapter.MacAddress,
+        $(if ($v4.Count) { $v4 -join ',' } else { '-' }),
+        $(if ($v6.Count) { $v6 -join ',' } else { '-' }), $media)
+    }
+    return
+  }
+
+  $ifconfig = Get-BinPath @('ifconfig')
+  if (-not $ifconfig) {
+    Write-Bad 'ifaces needs Get-NetAdapter or ifconfig; none found.'
+    return
+  }
+  $result = Invoke-External -File $ifconfig -Arguments @('-a') -TimeoutSec 8
+  if (-not $result.Output) {
+    Write-Bad 'ifconfig returned no data.'
+    return
+  }
+  $rows = @()
+  $current = $null
+  foreach ($line in ($result.Output -split "`n")) {
+    if ($line -match '^([A-Za-z0-9_.:-]+):\s+.*mtu\s+(\d+)') {
+      if ($current) { $rows += $current }
+      $name = $matches[1]
+      $mtu = [int]$matches[2]
+      $flags = ''
+      if ($line -match 'flags=\d+<([^>]*)>') { $flags = $matches[1] }
+      $state = 'down'
+      if ($flags -match 'UP' -and $flags -match 'RUNNING') { $state = 'up' }
+      $media = ''
+      if ($flags -match 'LOOPBACK') { $media = 'loopback' }
+      $current = [pscustomobject]@{
+        Name = $name; State = $state; Mtu = $mtu; Mac = '-'
+        V4 = @(); V6 = @(); Media = $media
+      }
+    } elseif ($current) {
+      if ($line -match '^\s+ether\s+(\S+)') { $current.Mac = $matches[1] }
+      elseif ($line -match '^\s+inet\s+(\d{1,3}(?:\.\d{1,3}){3})') { $current.V4 += $matches[1] }
+      elseif ($line -match '^\s+inet6\s+([0-9a-fA-F:]+)') {
+        if ($matches[1] -notmatch '^fe80') { $current.V6 += $matches[1] }
+      }
+      elseif ($line -match '^\s+media:\s*(.+)$') { $current.Media = $matches[1].Trim() }
+      elseif ($line -match '^\s+status:\s*(\S+)') { $current.State = $matches[1] }
+    }
+  }
+  if ($current) { $rows += $current }
+
+  Write-Host ('  {0,-18} {1,-8} {2,-6} {3,-18} {4,-18} {5,-26} {6}' -f 'Interface', 'State', 'MTU', 'MAC', 'IPv4', 'IPv6', 'Media') -ForegroundColor White
+  foreach ($row in $rows) {
+    Write-Host ('  {0,-18} {1,-8} {2,-6} {3,-18} {4,-18} {5,-26} {6}' -f $row.Name, $row.State, $row.Mtu, $row.Mac,
+      $(if ($row.V4.Count) { ($row.V4 | Select-Object -Unique) -join ',' } else { '-' }),
+      $(if ($row.V6.Count) { ($row.V6 | Select-Object -Unique) -join ',' } else { '-' }),
+      $(if ($row.Media) { $row.Media } else { '-' }))
+  }
+}
+
+function Invoke-Listen {
+  Write-Section 'Listening TCP sockets'
+  Write-Host ('  {0,-6} {1,-30} {2}' -f 'Proto', 'Local address:port', 'Process') -ForegroundColor White
+
+  if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+    $connections = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Sort-Object LocalPort)
+    foreach ($connection in $connections) {
+      $processName = '-'
+      if ($connection.OwningProcess) {
+        $process = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
+        if ($process) { $processName = $process.ProcessName }
+      }
+      Write-Host ('  {0,-6} {1,-30} {2}' -f 'TCP', ("{0}:{1}" -f $connection.LocalAddress, $connection.LocalPort), $processName)
+    }
+    return
+  }
+
+  $lsof = Get-BinPath @('lsof')
+  if ($lsof) {
+    $result = Invoke-External -File $lsof -Arguments @('-nP', '-iTCP', '-sTCP:LISTEN', '-F', 'cn') -TimeoutSec 10
+    $commandName = '-'
+    foreach ($line in ($result.Output -split "`n")) {
+      if ($line -match '^c(.+)$') {
+        $commandName = $matches[1]
+      } elseif ($line -match '^n(.+)$') {
+        Write-Host ('  {0,-6} {1,-30} {2}' -f 'TCP', $matches[1], $commandName)
+      }
+    }
+    return
+  }
+
+  $netstat = Get-BinPath @('netstat')
+  if ($netstat) {
+    $result = Invoke-External -File $netstat -Arguments @('-an') -TimeoutSec 10
+    foreach ($line in ($result.Output -split "`n")) {
+      if ($line -notmatch 'LISTEN') { continue }
+      $fields = @($line -split '\s+' | Where-Object { $_ })
+      if ($fields.Count -ge 4) {
+        Write-Host ('  {0,-6} {1,-30} {2}' -f $fields[0], $fields[3], '-')
+      }
+    }
+    return
+  }
+
+  Write-Bad 'listen needs Get-NetTCPConnection, lsof or netstat; none found.'
+}
+
+function Get-WifiBand([string]$Channel) {
+  if (-not $Channel) { return '-' }
+  $value = 0
+  if ($Channel -match '(\d+)') { $value = [int]$matches[1] }
+  if ($value -eq 0) { return '-' }
+  if ($value -le 14) { return '2.4 GHz' }
+  if ($value -ge 32 -and $value -le 177) { return '5 GHz' }
+  if ($value -gt 177) { return '6 GHz' }
+  return '-'
+}
+
+function Invoke-Wifi {
+  Write-Section 'Wi-Fi link'
+
+  if ($script:OnWindows) {
+    $netsh = Get-BinPath @('netsh')
+    if (-not $netsh) { Write-Bad 'wifi needs netsh; not found.'; return }
+    $result = Invoke-External -File $netsh -Arguments @('wlan', 'show', 'interfaces') -TimeoutSec 8
+    if (-not $result.Output -or $result.Output -notmatch 'SSID') {
+      Write-Bad 'no wireless interface reported (netsh wlan show interfaces).'
+      return
+    }
+    $info = @{}
+    foreach ($line in ($result.Output -split "`n")) {
+      if ($line -match '^\s*([^:]+?)\s*:\s*(.+?)\s*$') {
+        $key = $matches[1].Trim()
+        if (-not $info.ContainsKey($key)) { $info[$key] = $matches[2].Trim() }
+      }
+    }
+    $signal = '-'
+    $rssi = '-'
+    if ($info.ContainsKey('Signal')) {
+      $signal = $info['Signal']
+      if ($signal -match '^(\d+)%$') {
+        $rssi = ('{0}% (~{1} dBm)' -f $signal, ([int]([int]$matches[1] / 2) - 100))
+      }
+    }
+    $channel = '-'
+    if ($info.ContainsKey('Channel')) { $channel = $info['Channel'] }
+    $band = '-'
+    if ($info.ContainsKey('Band')) { $band = $info['Band'] }
+    elseif ($channel -ne '-') { $band = Get-WifiBand $channel }
+    $security = '-'
+    if ($info.ContainsKey('Authentication')) { $security = $info['Authentication'] }
+    if ($info.ContainsKey('Cipher')) { $security = "$security / $($info['Cipher'])" }
+    Write-Kv 'SSID' $(if ($info.ContainsKey('SSID')) { $info['SSID'] } else { '-' })
+    Write-Kv 'BSSID' $(if ($info.ContainsKey('BSSID')) { $info['BSSID'] } else { '-' })
+    Write-Kv 'Channel' $channel
+    Write-Kv 'Band' $band
+    Write-Kv 'RSSI / signal' $rssi
+    Write-Kv 'Noise' 'n/a (not exposed by netsh)'
+    Write-Kv 'Tx rate' $(if ($info.ContainsKey('Transmit rate (Mbps)')) { "$($info['Transmit rate (Mbps)']) Mbps" } else { '-' })
+    Write-Kv 'Security' $security
+    return
+  }
+
+  if ($script:OSKind -eq 'macos') {
+    $airport = '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport'
+    if (Test-Path $airport) {
+      $result = Invoke-External -File $airport -Arguments @('-I') -TimeoutSec 8
+      if ($result.Output -match 'agrCtlRSSI') {
+        $map = @{}
+        foreach ($line in ($result.Output -split "`n")) {
+          if ($line -match '^\s*([^:]+):\s*(.+)$') { $map[$matches[1].Trim()] = $matches[2].Trim() }
+        }
+        $channel = '-'
+        if ($map.ContainsKey('channel')) { $channel = (($map['channel'] -split ',')[0]).Trim() }
+        Write-Kv 'SSID' $(if ($map.ContainsKey('SSID')) { $map['SSID'] } else { '-' })
+        Write-Kv 'BSSID' $(if ($map.ContainsKey('BSSID')) { $map['BSSID'] } else { '-' })
+        Write-Kv 'Channel' $channel
+        Write-Kv 'Band' (Get-WifiBand $channel)
+        Write-Kv 'RSSI / signal' $(if ($map.ContainsKey('agrCtlRSSI')) { "$($map['agrCtlRSSI']) dBm" } else { '-' })
+        Write-Kv 'Noise' $(if ($map.ContainsKey('agrCtlNoise')) { "$($map['agrCtlNoise']) dBm" } else { '-' })
+        Write-Kv 'Tx rate' $(if ($map.ContainsKey('lastTxRate')) { "$($map['lastTxRate']) Mbps" } else { '-' })
+        Write-Kv 'Security' $(if ($map.ContainsKey('link auth')) { $map['link auth'] } else { '-' })
+        return
+      }
+    }
+    $wdutil = Get-BinPath @('wdutil')
+    if ($wdutil) {
+      $result = Invoke-External -File $wdutil -Arguments @('info') -TimeoutSec 8
+      if ($result.Output -match 'SSID') {
+        $map = @{}
+        foreach ($line in ($result.Output -split "`n")) {
+          if ($line -match '^\s*([^:]+):\s*(.+)$') { $map[$matches[1].Trim()] = $matches[2].Trim() }
+        }
+        $channel = '-'
+        if ($map.ContainsKey('Channel')) { $channel = $map['Channel'] }
+        Write-Kv 'SSID' $(if ($map.ContainsKey('SSID')) { $map['SSID'] } else { '-' })
+        Write-Kv 'BSSID' $(if ($map.ContainsKey('BSSID')) { $map['BSSID'] } else { '-' })
+        Write-Kv 'Channel' $channel
+        Write-Kv 'Band' (Get-WifiBand $channel)
+        Write-Kv 'RSSI / signal' $(if ($map.ContainsKey('RSSI')) { "$($map['RSSI']) dBm" } else { '-' })
+        Write-Kv 'Noise' $(if ($map.ContainsKey('Noise')) { "$($map['Noise']) dBm" } else { '-' })
+        Write-Kv 'Tx rate' $(if ($map.ContainsKey('Tx Rate')) { $map['Tx Rate'] } else { '-' })
+        Write-Kv 'Security' $(if ($map.ContainsKey('Security')) { $map['Security'] } else { '-' })
+        return
+      }
+    }
+    Write-Bad 'no Wi-Fi info: airport is gone on current macOS and wdutil returned nothing (wdutil info needs sudo).'
+    return
+  }
+
+  $iw = Get-BinPath @('iw')
+  if ($iw) {
+    $devices = Invoke-External -File $iw -Arguments @('dev') -TimeoutSec 6
+    $interface = $null
+    if ($devices.Output -match 'Interface\s+(\S+)') { $interface = $matches[1] }
+    if ($interface) {
+      $link = Invoke-External -File $iw -Arguments @('dev', $interface, 'link') -TimeoutSec 6
+      if ($link.Output -match 'SSID:\s*(.+)') {
+        Write-Kv 'SSID' $matches[1].Trim()
+      }
+      if ($link.Output -match 'Connected to\s+([0-9a-fA-F:]+)') { Write-Kv 'BSSID' $matches[1] }
+      elseif ($link.Output -match '^\s*BSSID:\s*([0-9a-fA-F:]+)') { Write-Kv 'BSSID' $matches[1] }
+      $frequency = 0
+      if ($link.Output -match 'freq:\s*(\d+)') { $frequency = [int]$matches[1] }
+      $channel = '-'
+      if ($frequency -gt 0) { $channel = [string][int](($frequency - 2407) / 5) }
+      Write-Kv 'Channel' $channel
+      Write-Kv 'Band' (Get-WifiBand $channel)
+      Write-Kv 'RSSI / signal' $(if ($link.Output -match 'signal:\s*(-?\d+)\s*dBm') { "$($matches[1]) dBm" } else { '-' })
+      Write-Kv 'Noise' 'n/a'
+      Write-Kv 'Tx rate' $(if ($link.Output -match 'tx bitrate:\s*([\d.]+)\s*MBit/s') { "$($matches[1]) Mbps" } else { '-' })
+      Write-Kv 'Security' '-'
+      return
+    }
+  }
+  $nmcli = Get-BinPath @('nmcli')
+  if ($nmcli) {
+    $result = Invoke-External -File $nmcli -Arguments @('-t', '-f', 'ACTIVE,SSID,BSSID,CHAN,SIGNAL,RATE,SECURITY', 'dev', 'wifi') -TimeoutSec 10
+    foreach ($line in ($result.Output -split "`n")) {
+      if ($line -match '^yes:') {
+        $fields = $line -split ':'
+        if ($fields.Count -ge 7) {
+          Write-Kv 'SSID' $fields[1]
+          Write-Kv 'BSSID' $fields[2]
+          Write-Kv 'Channel' $fields[3]
+          Write-Kv 'Band' (Get-WifiBand $fields[3])
+          Write-Kv 'RSSI / signal' ("{0}%" -f $fields[4])
+          Write-Kv 'Noise' 'n/a'
+          Write-Kv 'Tx rate' $fields[5]
+          Write-Kv 'Security' $fields[6]
+        }
+        return
+      }
+    }
+  }
+  Write-Bad 'wifi needs netsh, airport/wdutil, iw or nmcli; none reported a wireless link.'
+}
+
+function Invoke-Doctor {
+  Write-Section 'Doctor'
+  $checks = @()
+  $missingRequired = 0
+
+  $dnsEngine = Get-Command Resolve-DnsName -ErrorAction SilentlyContinue
+  if ($dnsEngine) {
+    $checks += [pscustomobject]@{ Check = 'Resolve-DnsName (DNS engine)'; Required = $true; Present = $true; Detail = $dnsEngine.Source }
+  } else {
+    $checks += [pscustomobject]@{ Check = 'Resolve-DnsName (DNS engine)'; Required = $true; Present = $false; Detail = 'missing: this build targets Windows; use dns-bench.zsh here' }
+    $missingRequired++
+  }
+
+  $dig = Get-BinPath @('dig')
+  $digRequired = -not $script:OnWindows
+  if (-not $dig) {
+    if ($digRequired) { $missingRequired++ }
+  }
+  $checks += [pscustomobject]@{ Check = 'dig'; Required = $digRequired; Present = [bool]$dig; Detail = $(if ($dig) { $dig } else { 'missing: ecs and the non-Windows DNS fallback need it' }) }
+
+  $curl = Get-CurlExe
+  if (-not $curl) { $missingRequired++ }
+  $checks += [pscustomobject]@{ Check = 'curl'; Required = $true; Present = [bool]$curl; Detail = $(if ($curl) { $curl } else { 'missing: http, tls fallback, public IP, speed need it' }) }
+
+  $ping = Get-BinPath @('ping')
+  if (-not $ping) { $missingRequired++ }
+  $checks += [pscustomobject]@{ Check = 'ping'; Required = $true; Present = [bool]$ping; Detail = $(if ($ping) { $ping } else { 'missing: mtu and speed latency need it' }) }
+
+  $openssl = Get-BinPath @('openssl')
+  $checks += [pscustomobject]@{ Check = 'openssl'; Required = $false; Present = [bool]$openssl; Detail = $(if ($openssl) { $openssl } else { 'optional: tls falls back to curl -v' }) }
+
+  $perl = Get-BinPath @('perl')
+  $checks += [pscustomobject]@{ Check = 'perl'; Required = $false; Present = [bool]$perl; Detail = $(if ($perl) { $perl } else { 'optional: not used on Windows' }) }
+
+  $traceroute = Get-BinPath @('traceroute', 'tracepath', 'tracert')
+  $checks += [pscustomobject]@{ Check = 'traceroute / tracepath / tracert'; Required = $false; Present = [bool]$traceroute; Detail = $(if ($traceroute) { $traceroute } else { 'optional: trace needs one of them' }) }
+
+  $lsof = Get-BinPath @('lsof')
+  $netstat = Get-BinPath @('netstat')
+  $checks += [pscustomobject]@{ Check = 'lsof / netstat'; Required = $false; Present = [bool]($lsof -or $netstat); Detail = $(if ($lsof) { $lsof } elseif ($netstat) { $netstat } else { 'optional on Windows: Get-NetTCPConnection is used' }) }
+
+  $platformTool = Get-BinPath @('netsh', 'networksetup', 'nmcli', 'scutil')
+  $checks += [pscustomobject]@{ Check = 'netsh / networksetup / nmcli'; Required = $false; Present = [bool]$platformTool; Detail = $(if ($platformTool) { $platformTool } else { 'optional: only used by info/wifi/reset' }) }
+
+  Write-Host ('  {0,-34} {1,-9} {2,-8} {3}' -f 'Check', 'Required', 'Status', 'Detail') -ForegroundColor White
+  foreach ($check in $checks) {
+    $status = 'missing'
+    $color = 'Red'
+    if ($check.Present) { $status = 'ok'; $color = 'Green' }
+    elseif (-not $check.Required) { $status = 'optional'; $color = 'Yellow' }
+    $requiredText = 'no'
+    if ($check.Required) { $requiredText = 'yes' }
+    Write-Host ('  {0,-34} {1,-9} {2,-8} {3}' -f $check.Check, $requiredText, $status, $check.Detail) -ForegroundColor $color
+  }
+
+  Write-Host ''
+  Write-Section 'Install and state'
+  $privilege = 'no'
+  if ($script:OnWindows) {
+    if ($script:IsAdmin) { $privilege = 'yes (elevated)' } else { $privilege = 'no (changing DNS needs Run as Administrator)' }
+  } else {
+    $privilege = 'not applicable (Windows-only DNS control)'
+  }
+  Write-Kv 'Privileges' $privilege
+  Write-Kv 'Script' $script:SelfPath
+  Write-Kv 'Version' ("{0} (PowerShell {1})" -f $script:Version, $PSVersionTable.PSVersion.ToString())
+
+  $installed = Get-Command 'dns-bench.ps1' -ErrorAction SilentlyContinue
+  if ($installed) { Write-Kv 'Installed copy' $installed.Source }
+  else { Write-Kv 'Installed copy' 'not on PATH (run this file directly)' }
+
+  $schedule = 'none'
+  if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+    try {
+      $task = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like '*dns-bench*' } | Select-Object -First 1
+      if ($task) { $schedule = "$($task.TaskName) [$($task.State)]" }
+    } catch { }
+  }
+  Write-Kv 'Schedule' $schedule
+
+  $log = Join-Path $HOME '.dns-bench-previous.txt'
+  if (Test-Path $log) {
+    Write-Kv 'Change log' $log
+    foreach ($line in (Get-Content -Path $log -Tail 3 -ErrorAction SilentlyContinue)) {
+      Write-Note $line
+    }
+  } else {
+    Write-Kv 'Change log' 'none yet'
+  }
+
+  Write-Host ''
+  if ($missingRequired -gt 0) {
+    Write-Bad ("  {0} required dependency/dependencies missing. Fix those before benchmarking." -f $missingRequired)
+    exit 1
+  }
+  Write-Good '  All required dependencies are present.'
+}
+
+# =====================================================================
 # dispatch
 # =====================================================================
-if ($Command -eq 'help') { Show-Usage; exit 0 }
+if ($Command -eq 'help') {
+  if ($Argument) { exit (Show-CommandHelp -Name $Argument) }
+  Show-Usage
+  exit 0
+}
 if ($Command -eq 'version') { Write-Host "dns-bench $($script:Version) (PowerShell)"; exit 0 }
 
 $windowsOnly = @('run', 'info', 'test', 'best', 'adblock', 'set', 'reset', 'status', 'list', 'flush')
@@ -1653,9 +3225,25 @@ try {
     'flush' { Invoke-Flush }
     'demo' { Invoke-Demo }
     'update' { Invoke-Update }
+    'ports' { Invoke-Ports }
+    'http' { Invoke-Http }
+    'tls' { Invoke-Tls }
+    'trace' { Invoke-Trace }
+    'asn' { Invoke-Asn }
+    'ptr' { Invoke-Ptr }
+    'leak' { Invoke-Leak }
+    'propagation' { Invoke-Propagation }
+    'mtu' { Invoke-Mtu }
+    'ecs' { Invoke-Ecs }
+    'ifaces' { Invoke-Ifaces }
+    'listen' { Invoke-Listen }
+    'wifi' { Invoke-Wifi }
+    'doctor' { Invoke-Doctor }
     default {
       Write-Bad "Unknown command: $Command"
-      Write-Host 'Run: .\dns-bench.ps1 help'
+      $suggestion = Get-ClosestCommand $Command
+      if ($suggestion) { Write-Host "Did you mean: ${suggestion}? Try: .\dns-bench.ps1 help $suggestion" }
+      else { Write-Host 'Run: .\dns-bench.ps1 help' }
       exit 1
     }
   }

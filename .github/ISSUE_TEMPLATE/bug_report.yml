@@ -1,0 +1,89 @@
+name: Bug report
+description: Something in dns-bench is broken, wrong, or hangs.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two things make a bug reproducible: the command you ran, and what
+        `dns-bench doctor` says about this machine.
+
+        **Redact before you paste.** Real output contains your DNS servers, public IP, gateway, and
+        sometimes your ISP and city. Replace them with `<redacted>`.
+
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command, with flags, from your shell history.
+      placeholder: dns-bench -q -N --no-csv
+    validations:
+      required: true
+
+  - type: input
+    id: exit-code
+    attributes:
+      label: Exit code
+      description: Run `echo $?` (or `$LASTEXITCODE` on Windows) right after.
+      placeholder: "1"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and shell version
+      description: "macOS: `sw_vers -productVersion`, `zsh --version`. Linux: `uname -sr`, `zsh --version`, and your distro. Windows: `$PSVersionTable.PSVersion`."
+      placeholder: macOS 15.1 / zsh 5.9 (arm64-apple-darwin24.0)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: dns-bench doctor output
+      description: Run `dns-bench doctor` and paste all of it. It exits non-zero when a required tool is missing, and that is often the answer.
+      render: shell
+      placeholder: |
+        dns-bench 3.3.0 doctor
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What you thought would happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead. Paste the error text, not a screenshot of it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: report-only
+    attributes:
+      label: Output of a report-only run
+      description: "`dns-bench -N --no-csv` (Windows: `-ReportOnly -NoCsv`). This changes nothing. Redact IPs, DNS servers and gateway — the identity lines at the top of the output are the sensitive ones."
+      render: shell
+      placeholder: |
+        <redacted output>
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I redacted IPs, DNS servers, gateway and hostnames from the pasted output.
+          required: true
+        - label: This is not a security issue (those go to SECURITY.md, privately).
+          required: true

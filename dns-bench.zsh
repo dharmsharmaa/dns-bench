@@ -1,5 +1,5 @@
 #!/bin/zsh
-# dns-bench 3.2: DNS benchmark, network diagnostics, domain troubleshooting. macOS + Linux.
+# dns-bench 3.3: DNS benchmark, network diagnostics, domain troubleshooting. macOS + Linux.
 # Author: Dharm Sharma (https://dharmsharma.com)
 # License: MIT (see LICENSE)
 # Run `dns-bench help` for commands.
@@ -64,7 +64,7 @@ fi
 
 emulate -L zsh
 
-VERSION=3.2.0
+VERSION=3.3.0
 SELF=${0:A}
 SELF_DIR=${SELF:h}
 
@@ -78,38 +78,51 @@ case "$(uname -s)" in
   *) print "dns-bench supports macOS and Linux (use dns-bench.ps1 on Windows)."; exit 1 ;;
 esac
 
+# ---------- colours ----------
+# Respect NO_COLOR and non-TTY. Extended palette shared by help, tables and
+# status words; nothing colour-related is ever written to the CSV.
+if [[ -t 1 && -z "$NO_COLOR" ]]; then
+  C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'
+  C_M=$'\e[35m'; C_C=$'\e[36m'; C_W=$'\e[97m'
+  C_D=$'\e[2m'; C_B=$'\e[1m'; C_0=$'\e[0m'
+else
+  C_G=; C_Y=; C_R=; C_M=; C_C=; C_W=; C_D=; C_B=; C_0=
+fi
+C_OK=$C_G C_ERR=$C_R C_WARN=$C_Y C_DIM=$C_D
+
+hl_names() {   # colour a list of command names: hl_names run best auto
+  local n out=
+  for n in "$@"; do out+="${out:+, }${C_M}${n}${C_0}"; done
+  print -n -- "$out"
+}
+help_group() { printf "  ${C_W}%-13s${C_0} %s\n" "$1" "$2" }
+help_item() {  # help_item USAGE DESCRIPTION EXAMPLE1 EXAMPLE2
+  print "${C_M}${1}${C_0}"
+  print "  $2"
+  print ""
+  print "${C_W}Examples${C_0}"
+  print "  ${C_C}$3${C_0}"
+  print "  ${C_C}$4${C_0}"
+}
+
 usage() {
+  print "${C_B}dns-bench${C_0} ${C_D}$VERSION${C_0}: benchmark DNS resolvers, check your network, troubleshoot domains."
+  print ""
+  print "Usage: dns-bench ${C_C}[command]${C_0} [options]"
+  print "       dns-bench help ${C_M}<command>${C_0}"
+  print ""
+  print "${C_W}Commands${C_0}"
+  help_group "benchmark"   "$(hl_names run best auto)"
+  help_group "dns control" "$(hl_names set reset adblock status list flush)"
+  help_group "diagnose"    "$(hl_names info test)"
+  help_group "network"     "$(hl_names speed ports http tls trace asn ptr mtu leak propagation ecs ifaces listen wifi)"
+  help_group "maintenance" "$(hl_names install uninstall cron update demo doctor)"
+  print ""
+  print "${C_D}run is the default: full benchmark, then asks what to apply.${C_0}"
+  print "${C_D}help <command> prints usage and examples for one command.${C_0}"
+  print ""
+  print "${C_W}Options${C_0}"
   cat <<'EOF'
-dns-bench: benchmark DNS resolvers, check your network, troubleshoot domains.
-
-Usage: dns-bench [command] [options]
-
-Commands
-  run               full benchmark + tables, then asks what to apply (default)
-  info              network info only (ips, gateway, dns in use, geo, health checks)
-  test DOMAIN       troubleshoot a domain: compare resolvers, authoritative NS,
-                    records, DNSSEC, TCP/HTTPS reachability
-  best              quick benchmark, apply the fastest unfiltered resolver
-  adblock [off]     apply the fastest ad-blocking resolver that really blocks
-                    (off = back to automatic dns)
-  set NAME|#        apply a resolver without benchmarking (e.g. set cloudflare)
-  reset             back to automatic dns (DHCP / router)
-  flush             flush the DNS cache (needs sudo)
-  status            what dns you use now, installed copy, schedule
-  list              print the resolver list
-  speed             network speed test: latency, jitter, download, upload
-  demo              print sample output for screenshots (no network, no changes)
-  auto              unattended: quick benchmark, switch only if clearly better
-                    (this is what the schedule runs)
-  install [--system]  copy this script into your PATH as `dns-bench`
-  uninstall         remove the command and the schedule
-  cron WHEN|off     schedule auto runs. WHEN = hourly | 6h | daily | weekly |
-                    2d (every N days, 1-30) | "m h dom mon dow" (Linux).
-                    add --at HH:MM for daily/weekly/Nd, --profile best|adblock
-  update [--check]  pull the latest version of this script from GitHub
-  version, help
-
-Options
   -d DOMAIN   domain for the cached-latency test (default google.com)
   -n N        samples per resolver, 1-20 (default 5)
   -t K        resolvers in the service test, 1-12 (default 5)
@@ -121,7 +134,7 @@ Options
   -T LIST     (test) record types to show (default A AAAA CNAME NS MX TXT SOA CAA)
   -s          skip the popular-service test
   -c          skip the continent latency test
-  -q          quick mode (-s -c, 3 samples, speed phases 4 s)
+  -q          quick mode (-s -c, 3 samples, speed phases 4 s); terse for network commands
   -P          privacy: no external ip/geo lookups
   -N          report only, never change dns
   -y          don't ask, apply the best resolver
@@ -135,8 +148,123 @@ Options
 Env: DNSBENCH_JOBS=N        max parallel probes (default 24)
      DNSBENCH_UPDATE_URL=   override the GitHub raw URL used by `update`
      DNSBENCH_CSV_DIR=      where auto-saved CSVs go (default: next to the script)
+     DNSBENCH_DEBUG_COLD=1  print generated cold-query names to stderr
      DNSBENCH_ASSUME_YES=1  bootstrap: install a missing zsh without asking
 EOF
+}
+
+# Per-command help: usage line, one-line description, two runnable examples.
+cmd_help_detail() {
+  case "$1" in
+    run) help_item "dns-bench run [options]" \
+      "Full benchmark: cached/cold/jitter/loss, security probes, tables, then apply." \
+      "dns-bench run -n 3" "dns-bench run -N -o results.csv" ;;
+    best) help_item "dns-bench best" \
+      "Quick benchmark and apply the fastest unfiltered resolver." \
+      "dns-bench best" "dns-bench best -y" ;;
+    auto) help_item "dns-bench auto [--profile best|adblock]" \
+      "Unattended run for cron: switch only if the gain clears --min-gain." \
+      "dns-bench auto --min-gain 15" "dns-bench auto --profile adblock" ;;
+    set) help_item "dns-bench set NAME|#" \
+      "Apply a resolver from the list without benchmarking it." \
+      "dns-bench set cloudflare" "dns-bench set 4" ;;
+    reset) help_item "dns-bench reset" \
+      "Return DNS to automatic (DHCP / router) and flush the cache." \
+      "dns-bench reset" "sudo dns-bench reset" ;;
+    adblock) help_item "dns-bench adblock [off]" \
+      "Apply the fastest resolver that verifiably blocks ads (or turn that off)." \
+      "dns-bench adblock" "dns-bench adblock off" ;;
+    status) help_item "dns-bench status" \
+      "Show the DNS in use, the installed copy, and the schedule." \
+      "dns-bench status" "dns-bench status -q" ;;
+    list) help_item "dns-bench list" \
+      "Print every resolver with its row id, kind, region and addresses." \
+      "dns-bench list" "dns-bench list | grep -i quad9" ;;
+    flush) help_item "dns-bench flush [DOMAIN]" \
+      "Flush the local DNS cache (pass a domain to also resolve it after)." \
+      "sudo dns-bench flush" "dns-bench flush example.com" ;;
+    info) help_item "dns-bench info" \
+      "Network info only: addresses, gateway, DNS in use, geo, health checks." \
+      "dns-bench info" "dns-bench info -P" ;;
+    test) help_item "dns-bench test DOMAIN" \
+      "Troubleshoot a domain across resolvers, authoritative NS, DNSSEC, HTTPS." \
+      "dns-bench test example.com" "dns-bench test example.com -T 'A MX TXT'" ;;
+    speed) help_item "dns-bench speed [--duration N] [--no-upload]" \
+      "Latency, jitter, download and upload for the link itself." \
+      "dns-bench speed" "dns-bench speed -q" ;;
+    ports) help_item "dns-bench ports HOST [PORTS]" \
+      "TCP connect test per port; default 22 53 80 443 853 3306 5432 6379 8080." \
+      "dns-bench ports 1.1.1.1" "dns-bench ports example.com 80,443,853" ;;
+    http) help_item "dns-bench http URL" \
+      "HTTP status plus dns/connect/tls/ttfb/total timing, size and redirects." \
+      "dns-bench http https://example.com" "dns-bench http http://1.1.1.1/" ;;
+    tls) help_item "dns-bench tls HOST[:PORT]" \
+      "Certificate subject, issuer, validity, days left, SAN count and protocol." \
+      "dns-bench tls example.com" "dns-bench tls example.com:8443" ;;
+    trace) help_item "dns-bench trace HOST" \
+      "Hop-by-hop path with per-hop RTT (traceroute, tracepath fallback)." \
+      "dns-bench trace 1.1.1.1" "dns-bench trace example.com" ;;
+    asn) help_item "dns-bench asn HOST|IP" \
+      "ASN, prefix, country, registry and org via Team Cymru DNS (no whois)." \
+      "dns-bench asn 8.8.8.8" "dns-bench asn example.com" ;;
+    ptr) help_item "dns-bench ptr IP" \
+      "Reverse DNS plus forward-confirmed reverse DNS (FCrDNS) verdict." \
+      "dns-bench ptr 8.8.8.8" "dns-bench ptr 1.1.1.1" ;;
+    mtu) help_item "dns-bench mtu HOST" \
+      "Path MTU by DF-ping bisection from 1500 down." \
+      "dns-bench mtu 1.1.1.1" "dns-bench mtu example.com" ;;
+    leak) help_item "dns-bench leak" \
+      "Compare your public IP with the egress each resolver sees (DNS leak test)." \
+      "dns-bench leak" "dns-bench leak -q" ;;
+    propagation) help_item "dns-bench propagation DOMAIN [TYPE]" \
+      "Query public resolvers for a record, group identical answers, show agreement." \
+      "dns-bench propagation example.com" "dns-bench propagation example.com MX" ;;
+    ecs) help_item "dns-bench ecs [HOST]" \
+      "Show whether EDNS Client Subnet changes the answer (subnet=0 vs subnet=<ip>/24)." \
+      "dns-bench ecs" "dns-bench ecs example.com" ;;
+    ifaces) help_item "dns-bench ifaces" \
+      "Interface state, MTU, MAC, IPv4, IPv6 and media. No DNS queries." \
+      "dns-bench ifaces" "dns-bench ifaces -q" ;;
+    listen) help_item "dns-bench listen" \
+      "Listening TCP sockets with the owning process (lsof, netstat fallback)." \
+      "dns-bench listen" "sudo dns-bench listen" ;;
+    wifi) help_item "dns-bench wifi" \
+      "SSID, BSSID, channel, band, signal, noise, tx rate and security." \
+      "dns-bench wifi" "dns-bench wifi -q" ;;
+    doctor) help_item "dns-bench doctor" \
+      "Dependency, privilege, install, schedule, log and version checklist. Exits 1 if a required tool is missing." \
+      "dns-bench doctor" "dns-bench doctor -q" ;;
+    install) help_item "dns-bench install [--system]" \
+      "Copy this script into PATH as dns-bench." \
+      "dns-bench install" "sudo dns-bench install --system" ;;
+    uninstall) help_item "dns-bench uninstall" \
+      "Remove the installed command and the schedule." \
+      "dns-bench uninstall" "sudo dns-bench uninstall" ;;
+    cron) help_item "dns-bench cron WHEN|off [--at HH:MM] [--profile P]" \
+      "Schedule auto runs: hourly, 6h, daily, weekly, 2d, or a cron expression." \
+      "dns-bench cron daily --at 04:30" "dns-bench cron off" ;;
+    update) help_item "dns-bench update [--check]" \
+      "Pull the latest script from GitHub (or only check whether one exists)." \
+      "dns-bench update" "dns-bench update --check" ;;
+    demo) help_item "dns-bench demo" \
+      "Print a full sample run with fake data. No network, no changes." \
+      "dns-bench demo" "dns-bench demo -q" ;;
+    version) help_item "dns-bench version" \
+      "Print the version and exit." \
+      "dns-bench version" "dns-bench --version" ;;
+    help) help_item "dns-bench help [command]" \
+      "List commands by group, or show usage and examples for one command." \
+      "dns-bench help" "dns-bench help ports" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Closest command by prefix, then substring, then first letter.
+suggest_cmd() {
+  local want=$1 c
+  for c in $KNOWN_CMDS; do [[ "$c" == "$want"* ]] && { print -r -- "$c"; return; }; done
+  for c in $KNOWN_CMDS; do [[ "$c" == *"$want"* ]] && { print -r -- "$c"; return; }; done
+  for c in $KNOWN_CMDS; do [[ "$c[1]" == "$want[1]" ]] && { print -r -- "$c"; return; }; done
 }
 
 zparseopts -D -E -- d:=o_d n:=o_n t:=o_t x:=o_x o:=o_o r:=o_r T:=o_T N=o_N P=o_P s=o_s c=o_c q=o_q y=o_y h=o_h \
@@ -145,15 +273,34 @@ zparseopts -D -E -- d:=o_d n:=o_n t:=o_t x:=o_x o:=o_o r:=o_r T:=o_T N=o_N P=o_P
 (( $#o_h )) && { usage; exit 0 }
 (( $#o_ver )) && { print "dns-bench $VERSION"; exit 0 }
 
-KNOWN_CMDS=(run info test best adblock set reset flush status list speed demo auto install uninstall cron update version help)
+KNOWN_CMDS=(run info test best adblock set reset flush status list speed demo auto install uninstall cron update version help
+  ports http tls trace asn ptr leak propagation mtu ecs ifaces listen wifi doctor)
 CMD=run
 DOMAIN_ARG=
 if [[ -n "$1" ]]; then
   if (( ${KNOWN_CMDS[(Ie)$1]} )); then CMD=$1; shift
   elif [[ "$1" == *.* ]]; then DOMAIN_ARG=$1; shift
-  else print "Unknown command: $1 (try: dns-bench help)"; exit 1; fi
+  else
+    local _sug=$(suggest_cmd "$1")
+    print -u2 "${C_ERR}Unknown command:${C_0} $1"
+    [[ -n "$_sug" ]] && print -u2 "Did you mean ${C_M}$_sug${C_0}?  Try: dns-bench help $_sug"
+    print -u2 "Run 'dns-bench help' to see every command."
+    exit 1
+  fi
 fi
-[[ $CMD == help ]] && { usage; exit 0 }
+if [[ $CMD == help ]]; then
+  if [[ -n "$1" ]]; then
+    cmd_help_detail "$1" || {
+      local _sug=$(suggest_cmd "$1")
+      print -u2 "${C_ERR}No help for:${C_0} $1"
+      [[ -n "$_sug" ]] && print -u2 "Did you mean ${C_M}$_sug${C_0}?  Try: dns-bench help $_sug"
+      exit 1
+    }
+  else
+    usage
+  fi
+  exit 0
+fi
 [[ $CMD == version ]] && { print "dns-bench $VERSION"; exit 0 }
 
 DOMAIN="${o_d[-1]:-${DOMAIN_ARG:-google.com}}"
@@ -166,7 +313,7 @@ REC_TYPES="${o_T[-1]:-A AAAA CNAME NS MX TXT SOA CAA}"
 SKIP_SVC=$#o_s; SKIP_GEO=$#o_c; NO_APPLY=$#o_N; NO_EXT=$#o_P; ASSUME_YES=$#o_y
 (( $#o_q )) && { SKIP_SVC=1; SKIP_GEO=1; SAMPLES=3 }
 MAXJOBS="${DNSBENCH_JOBS:-24}"
-QUIET=0; FAST=0
+QUIET=0; FAST=0; TERSE=$#o_q
 CSV_AUTO=1; (( $#o_nocsv )) && CSV_AUTO=0
 PROGRESS_TTY=0; [[ -t 1 ]] && PROGRESS_TTY=1
 (( $#o_noprog )) && PROGRESS_TTY=0
@@ -181,27 +328,23 @@ SPEED_UPLOAD=1; (( $#o_noul )) && SPEED_UPLOAD=0
 [[ "$TOPK" == <1-12> ]]     || { print "Top-K (-t) must be 1-12."; exit 1 }
 [[ "$MAXJOBS" == <1-200> ]] || MAXJOBS=24
 
-die()  { print -u2 "dns-bench: $*"; exit 1 }
-warn() { (( QUIET )) || print -u2 "  warning: $*" }
+die()  { print -u2 "${C_ERR}dns-bench:${C_0} $*"; exit 1 }
+warn() { (( QUIET )) || print -u2 "  ${C_WARN}warning:${C_0} $*" }
 
 need() { command -v "$1" >/dev/null 2>&1 }
-if ! need dig; then
-  if (( IS_LINUX )); then die "dig not found. install it: apt install dnsutils | dnf install bind-utils | pacman -S bind | apk add bind-tools"
-  else die "dig not found (it normally ships with macOS)"; fi
-fi
-for bin in curl perl awk sort; do need $bin || die "missing dependency: $bin"; done
-if (( IS_MAC )); then
-  for bin in networksetup scutil route ipconfig ifconfig; do need $bin || die "missing dependency: $bin"; done
-else
-  need ip || die "missing dependency: ip (iproute2)"
-fi
-need ping || die "missing dependency: ping"
-
-# ---------- colours ----------
-if [[ -t 1 && -z "$NO_COLOR" ]]; then
-  C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_D=$'\e[2m'; C_B=$'\e[1m'; C_C=$'\e[36m'; C_0=$'\e[0m'
-else
-  C_G=; C_Y=; C_R=; C_D=; C_B=; C_C=; C_0=
+# doctor exists to report a broken environment, so it must run before the gate.
+if [[ $CMD != doctor ]]; then
+  if ! need dig; then
+    if (( IS_LINUX )); then die "dig not found. install it: apt install dnsutils | dnf install bind-utils | pacman -S bind | apk add bind-tools"
+    else die "dig not found (it normally ships with macOS)"; fi
+  fi
+  for bin in curl perl awk sort; do need $bin || die "missing dependency: $bin"; done
+  if (( IS_MAC )); then
+    for bin in networksetup scutil route ipconfig ifconfig; do need $bin || die "missing dependency: $bin"; done
+  else
+    need ip || die "missing dependency: ip (iproute2)"
+  fi
+  need ping || die "missing dependency: ping"
 fi
 
 TMP=$(mktemp -d) || exit 1
@@ -287,6 +430,47 @@ pb_stop() {   # pb_stop [WATCH_PID]
 # =====================================================================
 COLD_TLDS=(com net org)
 
+# --- cold-query naming ------------------------------------------------------
+# A "cold" number is only meaningful if the name really was uncached. Forked
+# probe workers inherit the parent's $RANDOM state, so without an explicit
+# reseed every resolver would be asked the identical three names. That is not
+# merely wasteful: Verisign and Neustar both front the UltraDNS backend, so a
+# name warmed by one probe can be answered from cache moments later by another.
+# Cache reuse would flatter the score, which is the one bug class this tool
+# cannot afford. Hence: reseed per worker, and make every cold name unique per
+# resolver AND per run (run salt + resolver index + sample index).
+zmodload zsh/datetime 2>/dev/null
+RUN_SALT=
+make_run_salt() {
+  local digits=0123456789abcdefghijklmnopqrstuvwxyz n out=
+  local us=${EPOCHREALTIME//[^0-9]/}
+  us=${us[-15,-1]}                    # keep the low digits: EPOCHREALTIME has 20
+  [[ "$us" == <-> ]] || us=$(( $(date +%s) * 1000000 ))
+  n=$(( (us + ${sysparams[pid]:-$$} * 97) % 2176782336 ))   # 36^6
+  (( n < 0 )) && n=$(( -n ))
+  while (( n > 0 )); do out="${digits[$(( n % 36 + 1 ))]}$out"; n=$(( n / 36 )); done
+  print -r -- "${out:-0}"
+}
+RUN_SALT=$(make_run_salt)
+
+# Reseed the per-worker RNG from high-resolution time, pid and resolver index.
+seed_probe_rng() {   # seed_probe_rng RESOLVER_IDX
+  local us=${EPOCHREALTIME//[^0-9]/}
+  us=${us[-15,-1]}
+  [[ "$us" == <-> ]] || us=$(( $(date +%s) * 1000000 ))
+  RANDOM=$(( (us + ${sysparams[pid]:-$$} * 31 + $1 * 7919) % 32768 ))
+}
+
+cold_name() {   # cold_name RESOLVER_IDX SAMPLE_IDX
+  local tld=${COLD_TLDS[$(( RANDOM % 3 + 1 ))]}
+  print -r -- "cold-${RUN_SALT}-r${1}-${2}.${tld}"
+}
+
+cold_trace() {  # DNSBENCH_DEBUG_COLD=1 prints every generated name to stderr
+  [[ -n "$DNSBENCH_DEBUG_COLD" && "$DNSBENCH_DEBUG_COLD" != 0 ]] && print -u2 "cold-name $1"
+  return 0
+}
+
 # tcp_ms HOST PORT [TIMEOUT] -> prints ms, returns 1 on failure
 tcp_ms() {
   local out
@@ -294,14 +478,14 @@ tcp_ms() {
   print "$out"
 }
 
-# dns_stats IP cached|cold COUNT -> "median min max loss%"
+# dns_stats IP cached|cold COUNT [RESOLVER_IDX] -> "median min max loss%"
 dns_stats() {
-  local ip=$1 mode=$2 n=$3 i q out ms fails=0 tries valid
+  local ip=$1 mode=$2 n=$3 idx=${4:-0} i q out ms fails=0 tries valid
   local -a t
   [[ "$ip" == none ]] && { print "N/A - - -"; return }
   tries=$n; [[ $mode == cached ]] && tries=$(( n + 1 ))
   for (( i = 1; i <= tries; i++ )); do
-    if [[ $mode == cold ]]; then q="x$RANDOM$RANDOM$i.${COLD_TLDS[$(( RANDOM % 3 + 1 ))]}"; else q=$DOMAIN; fi
+    if [[ $mode == cold ]]; then q=$(cold_name "$idx" "$i"); cold_trace "$q"; else q=$DOMAIN; fi
     out=$(dig @"$ip" "$q" A +tries=1 +time=2 +stats 2>/dev/null)
     valid=0
     if [[ $mode == cold ]]; then
@@ -603,8 +787,10 @@ t_dnssec() {
   else print "?"; fi
 }
 t_nx() {
-  local out
-  out=$(dig @"$1" "nx$RANDOM$RANDOM$RANDOM.com" A +tries=1 +time=3 2>/dev/null)
+  local out q tld=${COLD_TLDS[$(( RANDOM % 3 + 1 ))]}
+  q="nx-${RUN_SALT}-r${2:-0}.${tld}"   # unique per resolver and run, like the cold names
+  cold_trace "$q"
+  out=$(dig @"$1" "$q" A +tries=1 +time=3 2>/dev/null)
   if   [[ "$out" == *"status: NXDOMAIN"* ]]; then print ok
   elif [[ "$out" == *"status: NOERROR"*  ]]; then print HIJACK
   else print "?"; fi
@@ -847,6 +1033,7 @@ build_resolvers() {
     "KT (Korea Telecom)|U|AS|168.126.63.1|168.126.63.2|none|none"
     "LG U+ (Korea)|U|AS|164.124.101.2|203.248.252.2|none|none"
     "SingTel (Singapore)|U|AS|165.21.83.88|165.21.100.88|none|none"
+    "dnsforge.de (ads)|A|EU|176.9.93.198|none|none|none"
   )
   local d
   if (( GW_DNS )); then RESOLVERS+=("Router / Gateway|C|LAN|$GATEWAY|none|none|none"); fi
@@ -878,12 +1065,13 @@ calc_score() {  # lower is better: cold lookups weigh double, packet loss is pen
 probe() {
   local idx=$1 entry=$2 name kind region a b c d
   local cm cmin cmax closs cold x1 x2 x3 x4 v4p v4pl v6m="N/A" v6p="N/A" dsec="-" nx="-" tcp="-" dot="-" doh="-" ads="-" pop="-" jit="-" score skey
+  seed_probe_rng "$idx"   # before any random draw: forked workers share $RANDOM state
   IFS="|" read -r name kind region a b c d <<< "$entry"
   read -r cm cmin cmax closs <<< "$(dns_stats "$a" cached $SAMPLES)"
   if is_num "$cm"; then
-    read -r cold x1 x2 x3 <<< "$(dns_stats "$a" cold 3)"
+    read -r cold x1 x2 x3 <<< "$(dns_stats "$a" cold 3 "$idx")"
     jit=$(( cmax - cmin ))
-    nx=$(t_nx "$a")
+    nx=$(t_nx "$a" "$idx")
     if (( ! FAST )); then
       read -r v4p v4pl <<< "$(ping_stats "$a" 4)"
       if (( HAS_V6 )) && [[ "$c" != none ]]; then
@@ -1100,10 +1288,11 @@ print_info() {
 # =====================================================================
 typeset -A BEST_REG_IDX
 print_tables() {
-  local line skey idx name kind region cm jit loss cold score v4p v6m v6p dsec nx tcp dot doh ads pop rank=1 rc
+  local line skey idx name kind region cm jit loss cold score v4p v6m v6p dsec nx tcp dot doh ads pop rank=1 rc scol
+  local nrows=${#SORTED} n25=$(( ${#SORTED} / 4 ))
   BEST_REG_IDX=()
   print
-  print -n "${C_B}"
+  print -n "${C_W}"
   cell "Rank" 5; cell "#" 4; cell "Provider" 27; cell "Rgn" 4; cell "Kind" 5
   cell "Cached" 9; cell "Jitter" 8; cell "Loss" 6; cell "Cold" 9; cell "Score" 7
   cell "v4 ping" 9; cell "v6 DNS" 9; cell "v6 ping" 9
@@ -1116,7 +1305,11 @@ print_tables() {
     ms_cell "$cm" 9; if is_num "$jit"; then cell "${jit} ms" 8 "$C_D"; else cell "-" 8 "$C_D"; fi
     if is_num "$loss" && (( loss > 0 )); then cell "${loss}%" 6 "$C_R"; else cell "${loss}%" 6 "$C_D"; fi
     ms_cell "$cold" 9
-    if is_num "$score" && (( score < 99999 )); then cell "$score" 7 "$C_B"; else cell "-" 7 "$C_D"; fi
+    scol=$C_R
+    if (( rank == 1 )); then scol="${C_B}${C_G}"
+    elif (( rank <= n25 )); then scol=$C_G
+    elif (( rank <= nrows - n25 )); then scol=$C_Y; fi
+    if is_num "$score" && (( score < 99999 )); then cell "$score" 7 "$scol"; else cell "-" 7 "$C_D"; fi
     ms_cell "$v4p" 9; ms_cell "$v6m" 9; ms_cell "$v6p" 9
     print
     if [[ "$kind" == U && -z "${BEST_REG_IDX[$region]}" ]] && is_num "$cm" && (( loss <= 20 )); then BEST_REG_IDX[$region]=$idx; fi
@@ -1126,7 +1319,7 @@ print_tables() {
 
   (( FAST )) && return
   section "Features & security"
-  print -n "${C_B}"
+  print -n "${C_W}"
   cell "#" 4; cell "Provider" 27; cell "DNSSEC" 8; cell "NXDOMAIN" 10; cell "TCP/53" 8; cell "DoT:853" 9; cell "443 open" 9; cell "Blocks ads" 11; cell "PoP / node" 24
   print "${C_0}"
   print "  ${C_D}-------------------------------------------------------------------------------------------------------------${C_0}"
@@ -2010,7 +2203,7 @@ cmd_demo() {
   kv "Captive portal" "${C_G}no${C_0}"
   kv "IPv6 to resolvers" "working"
 
-  section "DNS benchmark: 52 resolvers"
+  section "DNS benchmark: 53 resolvers"
   print "  Cached = median of 5 queries for example.com | Cold = median of 3 random uncached names | Score = (cached + 2*cold)/3 + 3*loss%"
   note "Probing up to $MAXJOBS resolvers at once"
 
@@ -2023,8 +2216,8 @@ cmd_demo() {
     "5|12|Control D Unfiltered|GL|U|23|3.0|0|47|34.3|16.8|24|17.1"
     "6|15|NextDNS (Anycast)|GL|U|27|3.4|0|52|38.7|17.9|28|18.2"
     "7|23|Verisign Public DNS|GL|U|31|4.1|0|58|43.7|19.4|31|19.8"
-    "8|51|Router / Gateway|LAN|C|2.4|0.6|0|39|68.8|1.9|-|1.8"
-    "9|52|Current system DNS|LAN|C|14|1.5|0|36|23.0|12.6|15|12.9"
+    "8|52|Router / Gateway|LAN|C|2.4|0.6|0|39|68.8|1.9|-|1.8"
+    "9|53|Current system DNS|LAN|C|14|1.5|0|36|23.0|12.6|15|12.9"
   )
   print
   print -n "${C_B}"
@@ -2054,8 +2247,8 @@ cmd_demo() {
       "12|Control D Unfiltered|yes|ok|yes|yes|yes|no|ams"
       "15|NextDNS (Anycast)|yes|ok|yes|yes|yes|no|ams"
       "23|Verisign Public DNS|yes|ok|yes|no|yes|no|-"
-      "51|Router / Gateway|?|ok|yes|no|yes|no|-"
-      "52|Current system DNS|yes|ok|yes|no|yes|no|-"
+      "52|Router / Gateway|?|ok|yes|no|yes|no|-"
+      "53|Current system DNS|yes|ok|yes|no|yes|no|-"
     )
     section "Features & security"
     print -n "${C_B}"
@@ -2103,6 +2296,675 @@ cmd_demo() {
 }
 
 # =====================================================================
+# network diagnostics (3.3): ports http tls trace asn ptr mtu leak
+#                             propagation ecs ifaces listen wifi doctor
+# =====================================================================
+# Every external call is bounded and non-fatal: a missing binary or a refused
+# connection prints one clear line and moves on, never aborting the run.
+# doctor is the only command allowed to fail loudly (exit 1).
+
+ms_of() { perl -e 'printf "%d", $ARGV[0]*1000+0.5' "$1" 2>/dev/null; }   # ms_of SECONDS
+
+port_service() {
+  case "$1" in
+    22) print ssh ;; 53) print dns ;; 80) print http ;; 443) print https ;;
+    853) print dot ;; 3306) print mysql ;; 5432) print postgres ;; 6379) print redis ;;
+    8080) print http-alt ;; *) print - ;;
+  esac
+}
+
+# tcp_state HOST PORT [TIMEOUT] -> "open MS" | "closed -" | "filtered -"
+tcp_state() {
+  local out
+  out=$(perl -MIO::Socket::IP -MTime::HiRes=time -e '
+    my ($h,$p,$to)=@ARGV; my $t=time;
+    my $s=IO::Socket::IP->new(PeerHost=>$h,PeerPort=>$p,Timeout=>$to);
+    if ($s) { close $s; printf "open %d\n", (time-$t)*1000+0.5; exit 0 }
+    my $e="$!"; print (($e =~ /refused/i) ? "closed -\n" : "filtered -\n");
+  ' "$1" "$2" "${3:-2}" 2>/dev/null)
+  print -r -- "${out:-filtered -}"
+}
+
+pub_ip() {   # public IPv4, best effort, bounded
+  local ip=
+  ip=$(curl -4 -s -m 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/ {print $2; exit}')
+  [[ -z "$ip" ]] && ip=$(dig -4 +short myip.opendns.com @resolver1.opendns.com +time=2 +tries=1 2>/dev/null | tail -1)
+  print -r -- "$ip"
+}
+
+resolve_v4() {   # resolve_v4 HOST|IP -> first IPv4
+  local ip=$1
+  [[ "$ip" == <->.<->.<->.<-> ]] && { print -r -- "$ip"; return; }
+  dig +short A "$ip" +time=2 +tries=1 2>/dev/null | grep -E '^[0-9.]+$' | head -1
+}
+
+cmd_ports() {
+  local host=$1 ports_arg=$2
+  [[ -n "$host" ]] || die "usage: dns-bench ports HOST [PORTS]"
+  [[ "$host" =~ '^[A-Za-z0-9._:-]+$' ]] || die "invalid host"
+  local -a plist
+  if [[ -z "$ports_arg" ]]; then
+    plist=(22 53 80 443 853 3306 5432 6379 8080)
+  else
+    local norm=${ports_arg//,/ }
+    plist=(${=norm})
+  fi
+  local p bad=
+  for p in $plist; do [[ "$p" == <1-65535> ]] || bad=$p; done
+  [[ -z "$bad" ]] || die "invalid port: $bad (expected 1-65535)"
+  section "TCP ports: $host"
+  print -n "${C_W}"; cell "  Port" 8; cell "State" 11; cell "Connect" 10; cell "Service" 13; print "${C_0}"
+  local -a pids; local tmo=2
+  for p in $plist; do ( tcp_state "$host" "$p" "$tmo" > "$TMP/port.$p" ) & pids+=($!); done
+  wait $pids
+  local state ms line nopen=0
+  for p in $plist; do
+    line=$(<"$TMP/port.$p" 2>/dev/null)
+    state=${line%% *}; ms=${line##* }
+    cell "  $p" 8
+    case "$state" in
+      open)     cell "open" 11 "$C_OK"; ms_cell "$ms" 10; (( nopen++ )) ;;
+      closed)   cell "closed" 11 "$C_D"; cell "-" 10 "$C_D" ;;
+      *)        cell "filtered" 11 "$C_WARN"; cell "-" 10 "$C_D" ;;
+    esac
+    cell "$(port_service "$p")" 13 "$C_D"; print
+  done
+  note "$nopen of ${#plist} open. open = handshake completed, closed = refused, filtered = no reply (drop/firewall)."
+}
+
+cmd_http() {
+  local url=$1
+  [[ -n "$url" ]] || die "usage: dns-bench http URL"
+  [[ "$url" == (http|https)://* ]] || url="https://$url"
+  [[ "$url" =~ '^https?://[^[:space:]]+$' ]] || die "invalid URL"
+  need curl || die "curl not found"
+  section "HTTP: $url"
+  local w out rc
+  w='%{http_code}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{num_redirects}|%{url_effective}|%{remote_ip}'
+  out=$(curl -sS -o /dev/null -m 25 --connect-timeout 8 -L -w "$w" "$url" 2>"$TMP/http.err"); rc=$?
+  if (( rc != 0 )); then
+    print "  ${C_ERR}request failed${C_0} (curl exit $rc)"
+    [[ -s "$TMP/http.err" ]] && sed 's/^/  /' "$TMP/http.err" | head -3
+    return 1
+  fi
+  local code dns_t con_t tls_t ttfb_t total_t size redirs final rip
+  IFS='|' read -r code dns_t con_t tls_t ttfb_t total_t size redirs final rip <<< "$out"
+  local ccol=$C_OK
+  [[ "$code" == 3* ]] && ccol=$C_C
+  [[ "$code" == 4* ]] && ccol=$C_WARN
+  [[ "$code" == (5*|000) ]] && ccol=$C_ERR
+  kv "HTTP status" "${ccol}${code}${C_0}"
+  kv "Final URL" "${final:-$url}"
+  kv "Remote IP" "${rip:--}"
+  print -n "${C_W}"; cell "  Phase" 14; cell "ms" 10; print "${C_0}"
+  local k v
+  for k in dns connect tls ttfb total; do
+    case "$k" in
+      dns) v=$dns_t ;; connect) v=$con_t ;; tls) v=$tls_t ;;
+      ttfb) v=$ttfb_t ;; total) v=$total_t ;;
+    esac
+    cell "  $k" 14
+    if [[ "$k" == tls && "$v" == 0* && "$url" == http://* ]]; then cell "-" 10 "$C_D"
+    else ms_cell "$(ms_of "$v")" 10; fi
+    print
+  done
+  kv "Size" "${size} bytes"
+  kv "Redirects" "${redirs:-0}"
+  note "dns = name lookup, connect = TCP, tls = handshake, ttfb = first byte, total = whole body."
+}
+
+cmd_tls() {
+  local target=$1 host port raw info
+  [[ -n "$target" ]] || die "usage: dns-bench tls HOST[:PORT]"
+  if [[ "$target" == \[*\]:* ]]; then
+    host=${target%]:*}; host=${host#[}; port=${target##*:}
+  elif [[ "$target" == *:* && "$target" != *::* ]]; then
+    host=${target%:*}; port=${target##*:}
+  else
+    host=$target; port=443
+  fi
+  [[ "$port" == <1-65535> ]] || die "invalid port: $port"
+  need openssl || die "openssl not found (install openssl; it normally ships with macOS and most distros)"
+  section "TLS: $host:$port"
+  raw=$( { perl -e 'alarm 12; exec @ARGV' openssl s_client -connect "$host:$port" -servername "$host" -showcerts </dev/null; } 2>&1 )
+  if [[ "$raw" != *"BEGIN CERTIFICATE"* ]]; then
+    print "  ${C_ERR}handshake failed${C_0} on $host:$port"
+    print -r -- "$raw" | grep -iE 'error|refused|timed out|unable|no route' | head -3 | sed 's/^/  /'
+    return 1
+  fi
+  print -r -- "$raw" | awk '/BEGIN CERTIFICATE/{f=1} f{print} /END CERTIFICATE/{exit}' > "$TMP/tls.pem"
+  info=$(openssl x509 -in "$TMP/tls.pem" -noout -subject -issuer -startdate -enddate -ext subjectAltName 2>/dev/null)
+  local cn issuer nb na days sans proto
+  cn=$(print -r -- "$info" | sed -n 's/^subject=//p' | sed 's/.*CN *= *//' | cut -d, -f1)
+  issuer=$(print -r -- "$info" | sed -n 's/^issuer=//p')
+  nb=$(print -r -- "$info" | sed -n 's/^notBefore=//p')
+  na=$(print -r -- "$info" | sed -n 's/^notAfter=//p')
+  sans=$(print -r -- "$info" | grep -o 'DNS:' | wc -l | tr -d ' ')
+  days=$(perl -MTime::Local=timegm -e '
+    my $s=shift; my %m=(Jan=>0,Feb=>1,Mar=>2,Apr=>3,May=>4,Jun=>5,Jul=>6,Aug=>7,Sep=>8,Oct=>9,Nov=>10,Dec=>11);
+    my ($mo,$d,$H,$M,$S,$y)=$s=~/([A-Z][a-z]{2})\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\d{4})/ or exit 1;
+    my $e=timegm($S,$M,$H,$d,$m{$mo},$y); printf "%d", int(($e-time)/86400)' "$na" 2>/dev/null)
+  proto=$(print -r -- "$raw" | sed -n 's/.*Protocol *: *\([^ ,]*\).*/\1/p' | head -1)
+  [[ -z "$proto" ]] && proto=$(print -r -- "$raw" | sed -n 's/^New, \([^,]*\),.*/\1/p' | head -1)
+  kv "Subject CN" "${cn:-unknown}"
+  kv "Issuer" "${issuer:--}"
+  kv "Valid from" "${nb:--}"
+  kv "Valid until" "${na:--}"
+  if [[ "$days" == <-> ]]; then
+    if (( days < 0 )); then kv "Days left" "${C_ERR}expired ${days#-} days ago${C_0}"
+    elif (( days < 21 )); then kv "Days left" "${C_WARN}${days} (expires soon)${C_0}"
+    else kv "Days left" "${C_OK}${days}${C_0}"; fi
+  else
+    kv "Days left" "?"
+  fi
+  kv "SAN entries" "${sans:-0}"
+  kv "Protocol" "${proto:-unknown}"
+  note "s_client connects to $host:$port and reads the leaf certificate; no verification is performed."
+}
+
+cmd_trace() {
+  local host=$1 out tool=
+  [[ -n "$host" ]] || die "usage: dns-bench trace HOST"
+  [[ "$host" =~ '^[A-Za-z0-9._:-]+$' ]] || die "invalid host"
+  if need traceroute; then
+    tool=traceroute
+    out=$( { perl -e 'alarm 30; exec @ARGV' traceroute -n -q 1 -w 1 -m 16 "$host"; } 2>/dev/null )
+  elif need tracepath; then
+    tool=tracepath
+    out=$( { perl -e 'alarm 30; exec @ARGV' tracepath -n -m 16 "$host"; } 2>/dev/null )
+  else
+    die "neither traceroute nor tracepath is installed (install traceroute)"
+  fi
+  section "Path to $host ($tool)"
+  if [[ -z "$out" ]]; then print "  ${C_ERR}no output${C_0}: $tool could not run (needs root on some systems)"; return 1; fi
+  print -n "${C_W}"; cell "  Hop" 6; cell "Address" 40; cell "RTT" 10; print "${C_0}"
+  local line hop addr rtt n=0
+  while IFS= read -r line; do
+    [[ "$line" == [[:space:]]*<->* ]] || continue
+    hop=${${(s: :)line}[1]}
+    addr=${${(s: :)line}[2]}
+    [[ "$addr" == "*" ]] && addr="-"
+    rtt=$(print -r -- "$line" | awk '{for(i=3;i<=NF;i++) if($i=="ms"){print $(i-1); exit}}')
+    cell "  $hop" 6; cell "$addr" 40 "$C_D"
+    if is_num "$rtt"; then ms_cell "$rtt" 10; else cell "-" 10 "$C_D"; fi
+    print
+    (( n++ ))
+  done <<< "$out"
+  (( n )) || print "  no hops parsed (the target may be local or unreachable)"
+}
+
+cmd_asn() {
+  local q=$1 ip origin asn prefix cc reg alloc name org
+  [[ -n "$q" ]] || die "usage: dns-bench asn HOST|IP"
+  ip=$(resolve_v4 "$q")
+  [[ -n "$ip" ]] || die "could not resolve $q to an IPv4 address"
+  section "ASN: $q ($ip)"
+  origin=$(dig +short TXT "$ip.origin.asn.cymru.com" +time=3 +tries=1 2>/dev/null | head -1 | tr -d '"')
+  if [[ -z "$origin" ]]; then print "  ${C_ERR}no Team Cymru answer${C_0} (offline, or DNS TXT blocked)"; return 1; fi
+  IFS='|' read -r asn prefix cc reg alloc <<< "${origin// /}"
+  name=$(dig +short TXT "AS${asn}.asn.cymru.com" +time=3 +tries=1 2>/dev/null | head -1 | tr -d '"')
+  org=${name#*|}; org=${org#*|}; org=${org#*|}; org=${org#*|}
+  kv "ASN" "AS${asn}"
+  kv "BGP prefix" "${prefix:--}"
+  kv "Country" "${cc:--}"
+  kv "Registry" "${reg:--}"
+  kv "Allocated" "${alloc:--}"
+  kv "Org" "${org:--}"
+  note "Source: Team Cymru DNS (origin.asn.cymru.com / asn.cymru.com). IPv4 only."
+}
+
+cmd_ptr() {
+  local ip=$1 n typ a ok
+  [[ -n "$ip" ]] || die "usage: dns-bench ptr IP"
+  section "Reverse DNS: $ip"
+  local -a names
+  names=(${(f)"$(dig +short -x "$ip" +time=3 +tries=1 2>/dev/null)"})
+  if (( ! ${#names} )); then
+    print "  ${C_WARN}no PTR record${C_0} for $ip"
+    note "Many cloud and residential ranges simply have no reverse DNS; that is not an error."
+    return 0
+  fi
+  print -n "${C_W}"; cell "  PTR name" 46; cell "FCrDNS" 9; cell "Forward answer" 32; print "${C_0}"
+  for n in $names; do
+    n=${n%.}
+    typ=A; [[ "$ip" == *:* ]] && typ=AAAA
+    dig_summary "" "$n" "$typ"
+    ok=no
+    for a in $DS_ANS; do [[ "$a" == "$ip" ]] && ok=yes; done
+    cell "  $n" 46
+    yn_cell "$ok" 9 yes
+    cell "${(j:, :)${(@)DS_ANS[1,2]:--}}" 32 "$C_D"; print
+  done
+  note "FCrDNS = the PTR name resolves forward to the same address. yes means mail servers will trust it more."
+}
+
+cmd_leak() {
+  local pub sys_egress r egress verdict vcol sys_bad=0 res_bad=0 total=0
+  local -A ROWNER
+  ROWNER=(1.1.1.1 Cloudflare 1.0.0.1 Cloudflare 8.8.8.8 Google 8.8.4.4 Google
+          9.9.9.9 Quad9 149.112.112.112 Quad9 208.67.222.222 OpenDNS
+          94.140.14.14 AdGuard 77.88.8.8 Yandex)
+  detect_net
+  section "DNS leak check"
+  pub=$(pub_ip)
+  kv "Your public IP" "${pub:-unknown (offline or privacy mode)}"
+  sys_egress=$(dig +short whoami.akamai.net +time=3 +tries=1 2>/dev/null | tail -1)
+  kv "System resolver egress" "${sys_egress:--}"
+  if [[ -n "$pub" && -n "$sys_egress" ]]; then
+    if [[ "$pub" == "$sys_egress" ]]; then
+      kv "System verdict" "${C_OK}same network as you${C_0}"
+    else
+      kv "System verdict" "${C_WARN}different network${C_0}: queries leave via an upstream/ISP resolver (VPN, router or transparent proxy)"
+      sys_bad=1
+    fi
+  fi
+  print ""
+  print -n "${C_W}"; cell "  Resolver" 22; cell "Egress IP" 20; cell "Verdict" 34; print "${C_0}"
+  local -a rlist
+  rlist=(${SYS_DNS[@]})
+  (( GW_DNS )) && [[ "$GATEWAY" != "${SYS_DNS[1]}" ]] && rlist+=("$GATEWAY")
+  if (( ! ${#rlist} )); then print "  no configured resolvers found"; return 0; fi
+  local shown=0
+  for r in $rlist; do
+    [[ "$r" == *.*.*.* ]] || continue
+    egress=$(dig @"$r" +short whoami.akamai.net +time=2 +tries=1 2>/dev/null | tail -1)
+    (( total++ ))
+    cell "  $r" 22
+    cell "${egress:--}" 20 "$C_D"
+    vcol=$C_D
+    if [[ -z "$egress" ]]; then
+      verdict="no answer"
+    elif [[ -n "$pub" && "$egress" == "$pub" ]]; then
+      verdict="your own network"; vcol=$C_OK
+    elif [[ -n "${ROWNER[$r]}" ]]; then
+      verdict="${ROWNER[$r]}'s own network"
+    elif [[ "$r" == (10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) ]]; then
+      verdict="local resolver, forwards upstream"; vcol=$C_WARN; (( res_bad++ ))
+    elif [[ "$egress" == (10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) ]]; then
+      verdict="private egress"; vcol=$C_WARN; (( res_bad++ ))
+    else
+      verdict="upstream network"
+    fi
+    cell "$verdict" 34 "$vcol"
+    print
+    (( ++shown >= 8 )) && { [[ $shown -lt ${#rlist} ]] && note "showing the first $shown of ${#rlist} configured resolvers"; break; }
+  done
+  print ""
+  if (( sys_bad || res_bad )); then
+    kv "Result" "${C_WARN}mismatch: $(( sys_bad + res_bad )) path(s) differ from your public network${C_0}"
+  else
+    kv "Result" "${C_OK}no mismatch detected${C_0}"
+  fi
+  note "A public resolver answering from its own network is expected. A local resolver whose egress is not yours is the one worth investigating."
+}
+
+cmd_propagation() {
+  local dom=$1 typ=${2:-A}
+  [[ -n "$dom" ]] || die "usage: dns-bench propagation DOMAIN [TYPE]"
+  dom=${dom%.}
+  [[ "$dom" =~ '^[A-Za-z0-9._-]+$' ]] || die "invalid domain"
+  [[ "$typ" =~ '^[A-Za-z0-9]+$' ]] || die "invalid record type"
+  typ=${(U)typ}
+  local -a RN RIP
+  RN=(Cloudflare Google Quad9 OpenDNS AdGuard Yandex AliDNS Quad101)
+  RIP=(1.1.1.1 8.8.8.8 9.9.9.9 208.67.222.222 94.140.14.14 77.88.8.8 223.5.5.5 101.101.101.101)
+  section "Propagation: $dom $typ"
+  print -n "${C_W}"; cell "  Resolver" 16; cell "Status" 11; cell "Time" 9; cell "Answer" 46; print "${C_0}"
+  local i st set shown col rawans
+  local -A GROUPS
+  local -a ORDER ANS
+  for (( i = 1; i <= ${#RIP}; i++ )); do
+    dig_summary "${RIP[$i]}" "$dom" "$typ"
+    st=$DS_ST
+    # +short is used for the answer text so MX/SRV keep their full rdata.
+    rawans=$(dig @"${RIP[$i]}" "$dom" "$typ" +short +tries=1 +time=3 2>/dev/null)
+    ANS=(${(f)rawans})
+    set=${(j:,:)${(o)ANS}}
+    [[ -z "$set" ]] && set="(no answer)"
+    case "$st" in NOERROR) col=$C_OK ;; *) col=$C_ERR ;; esac
+    shown=${(j:, :)${(@)ANS[1,3]}}
+    (( ${#ANS} > 3 )) && shown+=" +$(( ${#ANS} - 3 ))"
+    cell "  ${RN[$i]}" 16; cell "$st" 11 "$col"; ms_cell "$DS_MS" 9
+    cell "${shown:-(no $typ)}" 46; print
+    if [[ -z "${GROUPS[$set]}" ]]; then ORDER+=("$set"); GROUPS[$set]="${RN[$i]}"; else GROUPS[$set]+=", ${RN[$i]}"; fi
+  done
+  print ""
+  local top=${ORDER[1]} n=${#ORDER} agree=0
+  local -a members
+  for set in $ORDER; do
+    members=(${(s:, :)GROUPS[$set]})
+    (( ${#members} > agree )) && { agree=${#members}; top=$set; }
+  done
+  if (( n == 1 )); then
+    kv "Agreement" "${C_OK}${#RIP}/${#RIP} resolvers identical${C_0}"
+  else
+    kv "Agreement" "${C_WARN}${agree}/${#RIP} agree on the most common answer set${C_0}"
+    local cnt word
+    for set in $ORDER; do
+      cnt=$(print -r -- "${GROUPS[$set]}" | awk -F', ' '{print NF}')
+      if (( cnt == 1 )); then word=resolver; else word=resolvers; fi
+      printf "  %-14s %s\n" "$cnt $word" "${set:0:70}"
+    done
+  fi
+  note "Propagation is not the same as cache TTL; a CDN can legitimately answer differently per region."
+}
+
+cmd_mtu() {
+  local host=$1 lo=0 hi=1472 mid
+  [[ -n "$host" ]] || die "usage: dns-bench mtu HOST"
+  [[ "$host" =~ '^[A-Za-z0-9._:-]+$' ]] || die "invalid host"
+  need ping || die "ping not found"
+  section "Path MTU: $host"
+  if mtu_ok "$host" "$hi"; then
+    kv "Discovered MTU" "${C_OK}$(( hi + 28 ))${C_0} (no smaller path found; DF 1472 fits)"
+  else
+    local steps=0
+    while (( hi - lo > 1 )); do
+      mid=$(( (lo + hi) / 2 ))
+      if mtu_ok "$host" "$mid"; then lo=$mid; else hi=$mid; fi
+      (( steps++ ))
+    done
+    if (( lo == 0 )); then
+      print "  ${C_ERR}no DF probe succeeded${C_0}: the host may block ICMP or the path is broken."
+      return 1
+    fi
+    kv "Discovered MTU" "${C_OK}$(( lo + 28 ))${C_0} (largest DF payload that passed: $lo bytes)"
+    (( TERSE )) || note "$steps bisection probes, 1500 down."
+  fi
+  note "MTU = payload + 28 (IPv4 + ICMP headers). A value under 1500 usually means PPPoE (1492) or a tunnel."
+}
+
+mtu_ok() {   # mtu_ok HOST PAYLOAD_BYTES -> true when the DF probe gets a reply
+  local s=$2
+  if (( IS_MAC )); then
+    ping -c 1 -D -s "$s" -t 2 "$1" >/dev/null 2>&1
+  else
+    ping -c 1 -M do -s "$s" -W 2 "$1" >/dev/null 2>&1
+  fi
+}
+
+cmd_ecs() {
+  local host=${1:-example.com} srv=8.8.8.8 pub subnet base ecs chg=
+  [[ "$host" =~ '^[A-Za-z0-9._-]+$' ]] || die "invalid host"
+  section "EDNS Client Subnet: $host via $srv"
+  pub=$(pub_ip)
+  if [[ -n "$pub" ]]; then
+    subnet="${pub%.*}.0/24"
+  elif [[ -n "$LOCAL4" ]]; then
+    subnet="${LOCAL4%.*}.0/24"
+    note "public IP unknown; using the private subnet $subnet (resolvers may ignore RFC1918 subnets)."
+  else
+    print "  ${C_WARN}no address to build a subnet from${C_0}: run with -P off or check connectivity."
+    return 1
+  fi
+  base=$(dig @$srv "$host" A +subnet=0 +short +time=4 +tries=1 2>/dev/null | sort)
+  ecs=$(dig @$srv "$host" A +subnet="$subnet" +short +time=4 +tries=1 2>/dev/null | sort)
+  kv "Without ECS" "${(j:, :)${(f)base}:-no answer}"
+  kv "With ECS ($subnet)" "${(j:, :)${(f)ecs}:-no answer}"
+  if [[ -z "$base" && -z "$ecs" ]]; then print "  ${C_ERR}no answers${C_0}: $srv unreachable or the name has no A record"; return 1; fi
+  if [[ "$base" == "$ecs" ]]; then
+    kv "Result" "${C_OK}ECS does not change the answer${C_0}"
+  else
+    kv "Result" "${C_WARN}ECS changes the answer${C_0}: this resolver is steering by client subnet (CDN/geo-DNS)"
+  fi
+  note "dig +subnet sends the EDNS Client Subnet option; a resolver may ignore it by policy."
+}
+
+cmd_ifaces() {
+  section "Interfaces"
+  print -n "${C_W}"; cell "  Interface" 13; cell "State" 10; cell "MTU" 6; cell "MAC" 19; cell "IPv4" 17; cell "IPv6" 28; cell "Media" 14; print "${C_0}"
+  local name state mtu mac v4 v6 media
+  if (( IS_MAC )); then
+    local line
+    while IFS= read -r line; do
+      IFS='|' read -r name state mtu mac v4 v6 media <<< "$line"
+      cell "  $name" 13
+      if [[ "$state" == up ]]; then cell "$state" 10 "$C_OK"; else cell "$state" 10 "$C_D"; fi
+      cell "$mtu" 6 "$C_D"; cell "$mac" 19 "$C_D"; cell "$v4" 17; cell "${v6:0:26}" 28 "$C_D"; cell "${media:0:12}" 14 "$C_D"; print
+    done < <(ifconfig -a 2>/dev/null | awk '
+      /^[A-Za-z0-9_.]+:/ {
+        if (name != "") print name "|" state "|" mtu "|" mac "|" v4 "|" v6 "|" media;
+        name=$1; sub(/:$/,"",name); state="down"; mtu="-"; mac="-"; v4="-"; v6="-"; media="-";
+        if ($0 ~ /<UP/) state="up";
+        for (i=1;i<=NF;i++) if ($i=="mtu") mtu=$(i+1);
+        next
+      }
+      $1=="ether" { mac=$2 }
+      $1=="inet" { v4=$2 }
+      $1=="inet6" {
+        a=$2; sub(/%.*/,"",a)
+        if (a !~ /^fe80/) { if (v6=="-" || v6 ~ /^fe80/) v6=a }
+        else if (v6=="-") v6=a
+      }
+      $1=="media:" { media=$0; sub(/^[ \t]*media:[ \t]*/,"",media); sub(/,.*/,"",media) }
+      $1=="status:" { state=$2 }
+      END { if (name != "") print name "|" state "|" mtu "|" mac "|" v4 "|" v6 "|" media }
+    ')
+  else
+    local dev
+    for dev in ${(f)"$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)"}; do
+      state=down; [[ "$(cat /sys/class/net/$dev/operstate 2>/dev/null)" == up ]] && state=up
+      mtu=$(cat /sys/class/net/$dev/mtu 2>/dev/null); [[ -n "$mtu" ]] || mtu=-
+      mac=$(cat /sys/class/net/$dev/address 2>/dev/null); [[ -n "$mac" ]] || mac=-
+      v4=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4; exit}')
+      v6=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null | awk '{sub(/\/.*/,"",$4); print $4; exit}')
+      media=$(cat /sys/class/net/$dev/speed 2>/dev/null)
+      [[ -n "$media" && "$media" != <-> ]] && media=-
+      [[ "$media" == <-> ]] && media="${media} Mb/s"
+      cell "  $dev" 13
+      if [[ "$state" == up ]]; then cell "$state" 10 "$C_OK"; else cell "$state" 10 "$C_D"; fi
+      cell "${mtu:--}" 6 "$C_D"; cell "${mac:--}" 19 "$C_D"; cell "${v4:--}" 17
+      cell "${${v6:--}:0:26}" 28 "$C_D"; cell "${media:--}" 14 "$C_D"; print
+    done
+  fi
+  note "Read from the kernel only; no DNS queries and no packets sent."
+}
+
+cmd_listen() {
+  section "Listening TCP sockets"
+  local out line proto localaddr port proc
+  if need lsof; then
+    out=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null)
+    if [[ -z "$out" ]]; then
+      print "  ${C_WARN}no listening sockets visible${C_0}"
+      note "lsof is present but returned nothing; other users' sockets need sudo."
+      return 0
+    fi
+    print -n "${C_W}"; cell "  Proto" 9; cell "Listen address" 32; cell "Process" 28; print "${C_0}"
+    local -a rows
+    rows=(${(f)"$(print -r -- "$out" | awk 'NR>1 {addr=$9; sub(/ \(LISTEN\)/,"",addr); p=$8; p=(p=="IPv4"?"tcp4":"tcp6"); print p "|" addr "|" $1 "|" $2}')"})
+    for line in $rows; do
+      IFS='|' read -r proto localaddr proc pid <<< "$line"
+      cell "  $proto" 9 "$C_D"; cell "$localaddr" 32; cell "${proc:0:20} (pid ${pid:-?})" 28 "$C_D"; print
+    done
+    note "Process names are only visible for your own users' sockets unless run with sudo."
+  elif need netstat; then
+    if (( IS_MAC )); then out=$(netstat -an -p tcp 2>/dev/null | awk '$NF=="LISTEN"')
+    else out=$(netstat -ltn 2>/dev/null); fi
+    if [[ -z "$out" ]]; then print "  ${C_WARN}no listening sockets visible${C_0}"; return 0; fi
+    print -n "${C_W}"; cell "  Proto" 9; cell "Listen address" 32; cell "Process" 28; print "${C_0}"
+    print -r -- "$out" | awk 'NR>0 {print "tcp|" $4}' | while IFS='|' read -r proto localaddr; do
+      cell "  $proto" 9 "$C_D"; cell "$localaddr" 32; cell "-" 28 "$C_D"; print
+    done
+    note "netstat fallback cannot map ports to processes; install lsof for that."
+  else
+    print "  ${C_WARN}neither lsof nor netstat is installed${C_0}"
+    note "Install lsof (recommended) or net-tools."
+    return 1
+  fi
+}
+
+cmd_wifi() {
+  local dev ssid=- bssid=- chan=- band=- rssi=- noise=- tx=- sec=- phy=- src=
+  detect_net
+  dev=${ACTIVE_DEV:-}
+  section "Wi-Fi${dev:+ ($dev)}"
+  if (( IS_MAC )); then
+    ssid=$(networksetup -getairportnetwork "$dev" 2>/dev/null | sed -n 's/^Current Wi-Fi Network: //p')
+    [[ -z "$ssid" ]] && ssid=-
+    if need airport; then
+      local aout; aout=$(airport -I 2>/dev/null)
+      bssid=$(print -r -- "$aout" | awk -F': ' '/ BSSID/ {print $2}')
+      chan=$(print -r -- "$aout" | awk -F': ' '/ channel/ {print $2}')
+      rssi=$(print -r -- "$aout" | awk -F': ' '/agrCtlRSSI/ {print $2}')
+      noise=$(print -r -- "$aout" | awk -F': ' '/agrCtlNoise/ {print $2}')
+      tx=$(print -r -- "$aout" | awk -F': ' '/lastTxRate/ {print $2}')
+      sec=$(print -r -- "$aout" | awk -F': ' '/link auth/ {print $2}')
+      src="airport"
+    else
+      # airport was removed in recent macOS; system_profiler is the supported path.
+      local sp line
+      sp=$(system_profiler SPAirPortDataType 2>/dev/null)
+      src="system_profiler"
+      line=$(print -r -- "$sp" | awk '
+        /Current Network Information:/ {f=1; next}
+        /Other Local Wi-Fi Networks:/ {f=0}
+        f && /^[ ]{10,16}[^ ].*:$/ && $0 !~ /(PHY Mode|Channel|Security|Signal|Transmit Rate|Card Type|MAC Address|Locale|Country Code|Supported PHY|Supported Channels|Wake On|Status|Interfaces|Current Network)/ {
+          s=$0; sub(/^[ ]+/,"",s); sub(/:$/,"",s); if (ssid=="") ssid=s; next
+        }
+        f && /PHY Mode:/   { p=$0; sub(/.*PHY Mode: */,"",p); phy=p }
+        f && /Channel:/    { c=$0; sub(/.*Channel: */,"",c); ch=c }
+        f && /Security:/   { x=$0; sub(/.*Security: */,"",x); sec=x }
+        f && /Signal \/ Noise:/ { n=$0; sub(/.*Signal \/ Noise: */,"",n); sn=n }
+        f && /Transmit Rate:/   { t=$0; sub(/.*Transmit Rate: */,"",t); txr=t }
+        END { print ssid "|" ch "|" sn "|" txr "|" phy "|" sec }
+      ')
+      local spssid spchan spsn sptx spphy spsec
+      IFS='|' read -r spssid spchan spsn sptx spphy spsec <<< "$line"
+      [[ -n "$spssid" ]] && ssid=$spssid
+      chan=${spchan%% *}; [[ -z "$chan" ]] && chan=-
+      phy=${spphy:--}; tx=${sptx:--}; sec=${spsec:--}
+      band=$(print -r -- "$spchan" | grep -oE '(2|5|6)GHz' | head -1)
+      rssi=${spsn%%/*}; noise=${spsn##*/}
+      rssi=${rssi//[^0-9-]/}; noise=${noise//[^0-9-]/}
+      [[ -z "$rssi" ]] && rssi=-
+      [[ -z "$noise" ]] && noise=-
+    fi
+    # wdutil can report BSSID but demands root; never prompt for a password here.
+    if [[ "$bssid" == - || -z "$bssid" ]] && (( EUID == 0 )) && need wdutil; then
+      bssid=$(wdutil info 2>/dev/null | awk -F': ' '/BSSID/ {print $2; exit}')
+    fi
+  else
+    if need iw && [[ -n "$dev" ]]; then
+      local iwout; iwout=$(iw dev "$dev" link 2>/dev/null)
+      src=iw
+      ssid=$(print -r -- "$iwout" | sed -n 's/^[[:space:]]*SSID: //p')
+      bssid=$(print -r -- "$iwout" | sed -n 's/^[[:space:]]*Connected to //p' | awk '{print $1}')
+      chan=$(print -r -- "$iwout" | sed -n 's/.*channel \([0-9]*\).*/\1/p')
+      rssi=$(print -r -- "$iwout" | sed -n 's/.*signal: \(-\?[0-9]*\).*/\1/p')
+      tx=$(print -r -- "$iwout" | sed -n 's/.*tx bitrate: \([0-9.]*\).*/\1/p')
+      sec=$(iw dev "$dev" info 2>/dev/null | awk -F': ' '/type/ {print $2}')
+    elif need nmcli; then
+      src=nmcli
+      local nout; nout=$(nmcli -t -f active,ssid,bssid,chan,signal,rate,security dev wifi 2>/dev/null | awk -F: '$1=="yes" {print; exit}')
+      IFS=':' read -r _ ssid bssid chan rssi tx sec <<< "$nout"
+    fi
+  fi
+  [[ -n "$chan" && "$chan" != - ]] && [[ -z "$band" ]] && band=$(print -r -- "$chan" | grep -oE '(2|5|6)GHz' | head -1)
+  if [[ -z "$band" && "$chan" == <-> ]]; then
+    if (( chan <= 14 )); then band=2.4GHz
+    elif (( chan >= 32 && chan <= 177 )); then band=5GHz; fi
+  fi
+  chan=${chan%% *}
+  kv "SSID" "${ssid:--}"
+  kv "BSSID" "${bssid:--}"
+  kv "Channel" "${chan:--}${band:+ ($band)}"
+  kv "Signal / noise" "${rssi:--} dBm / ${noise:--} dBm"
+  if [[ "$tx" == <-> || "$tx" == <->.<-> ]]; then kv "Tx rate" "$tx Mbps"; else kv "Tx rate" "${tx:--}"; fi
+  kv "Security" "${sec:--}"
+  [[ -n "$phy" && "$phy" != - ]] && kv "PHY mode" "$phy"
+  (( TERSE )) || note "Source: ${src:-none}. ${src/system_profiler/system_profiler is slow (~4 s) but needs no root; airport is gone on recent macOS.}"
+  if [[ "$ssid" == - || "$ssid" == *redacted* ]]; then
+    note "SSID is hidden: grant Location access to the terminal, or run with sudo for wdutil. BSSID needs root on macOS."
+  elif [[ "$bssid" == - ]]; then
+    note "BSSID needs root on macOS (sudo wdutil info)."
+  fi
+  return 0
+}
+
+cmd_doctor() {
+  local -i fail=0
+  local b p inst sched logf=/var/log/dns-bench.log
+  section "Environment"
+  kv "dns-bench" "$VERSION"
+  kv "Script" "$SELF"
+  kv "Platform" "$(uname -s) $(uname -r) ($(uname -m))"
+  kv "Shell" "zsh $ZSH_VERSION"
+  if (( EUID == 0 )); then
+    kv "Privileges" "${C_OK}root${C_0}"
+  elif need sudo; then
+    kv "Privileges" "user $(id -un), sudo available"
+  else
+    kv "Privileges" "${C_WARN}user $(id -un), no sudo (apply/reset will fail)${C_0}"
+  fi
+  kv "Working dir" "$PWD"
+
+  section "Required tools"
+  for b in dig curl perl ping awk sort; do
+    if need "$b"; then printf "  %-14s %s\n" "$b" "${C_OK}ok${C_0}"
+    else printf "  %-14s %s\n" "$b" "${C_ERR}MISSING${C_0}"; fail=1; fi
+  done
+
+  section "Optional tools"
+  for b in openssl traceroute tracepath lsof netstat ifconfig hostname; do
+    if need "$b"; then printf "  %-14s %s\n" "$b" "${C_OK}ok${C_0}"
+    else printf "  %-14s %s\n" "$b" "${C_WARN}missing${C_0}"; fi
+  done
+  if (( IS_MAC )); then
+    for b in networksetup scutil route ipconfig; do
+      if need "$b"; then printf "  %-14s %s\n" "$b" "${C_OK}ok${C_0}"
+      else printf "  %-14s %s\n" "$b" "${C_WARN}missing${C_0}"; fi
+    done
+  else
+    for b in ip nmcli resolvectl iw; do
+      if need "$b"; then printf "  %-14s %s\n" "$b" "${C_OK}ok${C_0}"
+      else printf "  %-14s %s\n" "$b" "${C_WARN}missing${C_0}"; fi
+    done
+  fi
+
+  section "Install"
+  inst=$(installed_path)
+  if [[ -n "$inst" ]]; then kv "Installed copy" "$inst"; else kv "Installed copy" "${C_WARN}not installed${C_0} (run: dns-bench install)"; fi
+
+  section "Schedule"
+  sched=
+  if (( IS_MAC )); then
+    local -a plist=(/Library/LaunchDaemons/*dns-bench*(N))
+    (( ${#plist} )) && sched="launchd: ${plist[1]}"
+  else
+    [[ -f /etc/cron.d/dns-bench ]] && sched="/etc/cron.d/dns-bench"
+    [[ -z "$sched" && -f /etc/systemd/system/dns-bench.timer ]] && sched="systemd timer"
+  fi
+  if need crontab; then
+    p=$(crontab -l 2>/dev/null | grep 'dns-bench auto' | head -1)
+    [[ -n "$p" && -z "$sched" ]] && sched="crontab: $p"
+  fi
+  kv "Scheduled" "${sched:-${C_D}none${C_0}}"
+
+  section "Log"
+  if [[ -r "$logf" ]]; then
+    kv "File" "$logf"
+    (( TERSE )) || { print "  ${C_D}last lines:${C_0}"; tail -n 5 "$logf" 2>/dev/null | sed 's/^/    /'; }
+  else
+    kv "File" "${C_WARN}$logf not readable${C_0} (needs root, or nothing scheduled yet)"
+  fi
+
+  section "Current DNS"
+  local -a cur
+  cur=(${(u)${(f)"$(sys_dns_list)"}})
+  kv "In use" "${(j:, :)cur:-unknown}"
+
+  print ""
+  if (( fail )); then
+    print "  ${C_ERR}doctor: a required tool is missing.${C_0}"
+    if (( IS_LINUX )); then print "  Debian/Ubuntu: sudo apt install dnsutils curl openssl iproute2"; print "  Fedora/RHEL:  sudo dnf install bind-utils curl openssl iproute"; fi
+    return 1
+  fi
+  print "  ${C_OK}doctor: all required tools present.${C_0}"
+  return 0
+}
+
+# =====================================================================
 # dispatch
 # =====================================================================
 case "$CMD" in
@@ -2123,4 +2985,18 @@ case "$CMD" in
   uninstall) cmd_uninstall ;;
   cron)      cmd_cron "$1" ;;
   update)    cmd_update "$@" ;;
+  ports)     cmd_ports "$1" "$2" ;;
+  http)      cmd_http "$1" ;;
+  tls)       cmd_tls "$1" ;;
+  trace)     cmd_trace "$1" ;;
+  asn)       cmd_asn "$1" ;;
+  ptr)       cmd_ptr "$1" ;;
+  leak)      cmd_leak ;;
+  propagation) cmd_propagation "$1" "$2" ;;
+  mtu)       cmd_mtu "$1" ;;
+  ecs)       cmd_ecs "$1" ;;
+  ifaces)    cmd_ifaces ;;
+  listen)    cmd_listen ;;
+  wifi)      cmd_wifi ;;
+  doctor)    cmd_doctor ;;
 esac

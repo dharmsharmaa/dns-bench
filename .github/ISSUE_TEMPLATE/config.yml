@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the command reference
+    url: https://github.com/dharmsharmaa/dns-bench/blob/main/readme.md#command-reference
+    about: Every command, every flag, and what is read-only. Start here.
+  - name: Support and "which resolver is best"
+    url: https://github.com/dharmsharmaa/dns-bench/blob/main/SUPPORT.md
+    about: Where to ask what, and how to redact a report. Resolver recommendations are not a support request.
+  - name: Report a security issue
+    url: https://github.com/dharmsharmaa/dns-bench/blob/main/SECURITY.md
+    about: Privately, please. Do not open a public issue for a vulnerability.

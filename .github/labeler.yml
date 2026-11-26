@@ -1,0 +1,33 @@
+# actions/labeler v5
+cli-zsh:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "dns-bench.zsh"
+
+cli-powershell:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "dns-bench.ps1"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "readme.md"
+          - "CREDITS.md"
+          - "docs/**"
+
+app-frozen:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "source/app/**"
+          - "releases/**"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "SECURITY.md"

@@ -1,8 +1,9 @@
 # macOS
 .DS_Store
 
-# personal agent customization (stays local)
-.github/*
+# keep only genuinely personal GitHub customizations local; project files ship
+.github/workflows/local-*
+.github/copilot-instructions.md
 
 # CLI output
 dns-bench-*.csv
